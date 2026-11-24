@@ -8,14 +8,21 @@
 //! faces and the chamfer line or fillet arc bound, swept into a tool solid whose sides lie on the
 //! two faces, so the blend surface's tangent contact lies on the tool's own edges. The tools' blend
 //! faces are sewn into the body (`sew`); where they do not close up that way each region is cut
-//! away at a convex edge and added at a concave one with the kernel's booleans instead.
+//! away at a convex edge and added at a concave one with the kernel's booleans instead. Where
+//! every piece ends square, on a plane or at a corner with one other piece, no tool is made at
+//! all: each blend face is built outright, trimmed where it ends ([`strip`]), and sewn.
 //!
 //! Each piece ends where its edge does. Pieces whose edges continue each other tangentially share
-//! their end section exactly; two straight pieces that meet at a corner of one face, mirror images
-//! of each other, are trimmed on the plane between them; two convex pieces at a corner each leaves
-//! through the other's wall into air run on through it, and their crease is where the two cuts
-//! meet; a piece whose edge runs into one other face is extended past it and trimmed by that face's
-//! surface, and by the faces past any short edge its contact runs beyond (`run`); on a curved
+//! their end section exactly; two pieces that meet at a corner of one face, mirror images of each
+//! other in a plane that mirrors that face onto itself (two walls on a plate, or on a ball about a
+//! point of that plane), are trimmed on it, where their surfaces cross; two convex pieces at a
+//! corner each leaves through the other's wall into air run on through it, and their crease is
+//! where the two cuts meet; two pieces across a sharp edge between plane walls, which no plane
+//! mirrors, cross on a curve of their own, from where their contacts on the shared face meet to
+//! where the lower piece's contact on its wall meets the other's surface ([`strip`]); a piece
+//! whose edge runs into one other face is extended past it and
+//! trimmed by that face's surface, and by the faces past any short edge its contact runs beyond
+//! (`run`); on a curved
 //! face met at a glancing angle it runs on only until that surface takes in its whole section. A
 //! concave piece whose strip is wider than its face runs over the face's convex edge and is
 //! trimmed by the face past it. Three or more fillets meeting at a corner of planes close with the
@@ -49,6 +56,7 @@ pub(crate) use saddle::corner as saddle_corner;
 mod rolling;
 mod run;
 mod sew;
+mod strip;
 
 use crate::pick::faces_named;
 use crate::{
@@ -740,6 +748,10 @@ fn blend_settled(
     let mut saddles: Vec<saddle::Saddle> = Vec::new();
     let mut joints: Vec<(usize, usize)> = Vec::new();
     let mut creases: Vec<[(usize, usize); 2]> = Vec::new();
+    // How each end closes where the piece's blend face can be built outright ([`strip`]), and
+    // the corner two pieces cross past, which can be built no other way.
+    let mut closes: Vec<[Option<strip::Close>; 2]> = vec![[None; 2]; picked.len()];
+    let mut crossed: Option<String> = None;
     let mut beyonds: Vec<[std::result::Result<run::Beyond, String>; 2]> =
         vec![[Ok(run::Beyond::default()), Ok(run::Beyond::default())]; picked.len()];
     let mut cornered = false;
@@ -769,6 +781,17 @@ fn blend_settled(
                 ends[*i][end] = free_end(body, &picked[*i], &outlines[*i], v)?;
                 beyonds[*i][end] =
                     run::beyond(body, &picked, &picked[*i], &sections[*i], &outlines[*i], v);
+                let plain = beyonds[*i][end]
+                    .as_ref()
+                    .is_ok_and(run::Beyond::takes_nothing);
+                closes[*i][end] = match ends[*i][end] {
+                    End::Exact if plain => Some(strip::Close::Square),
+                    End::Trim(Clip::Plane { origin, keep }) if plain => Some(strip::Close::Plane {
+                        origin,
+                        normal: keep,
+                    }),
+                    _ => None,
+                };
             }
             [i, j] => {
                 let (ei, ej) = (
@@ -801,14 +824,34 @@ fn blend_settled(
                 }
                 if continues(body, &picked, &sections, &outlines, (*i, ei), (*j, ej), v) {
                     joints.push((*i, *j));
+                    closes[*i][ei] = Some(strip::Close::Square);
+                    closes[*j][ej] = Some(strip::Close::Square);
                     continue;
                 }
+                let walls = [(*i, *j), (*j, *i)]
+                    .map(|(a, b)| wall_plane(body, &picked[a], &picked[b], body.vertex(v).point));
+                let past = bend_between(body, &picked, (*i, *j), v) != Some(sections[*i].convex);
+                let cross = |k: usize, mirror: Option<(Point3, Vec3)>| {
+                    let (other, end) = if k == 0 { (*j, ej) } else { (*i, ei) };
+                    walls[k].map(|wall| strip::Close::Cross {
+                        other,
+                        end,
+                        wall,
+                        mirror,
+                        past,
+                    })
+                };
                 // Pieces that meet at an angle stay separate tools, cut one after the other: the
                 // second cut meets the first's blend surface across it and leaves their crease,
                 // where a union of the two would have to resolve their shared faces at a seam.
-                if let Some([ci, cj]) = mitre(body, &picked, &sections, (*i, *j), v)? {
+                if let Some([ci, cj]) = mitre(body, &picked, (*i, *j), v)? {
                     ends[*i][ei] = End::Trim(ci);
                     ends[*j][ej] = End::Trim(cj);
+                    let Clip::Plane { origin, keep } = ci else {
+                        unreachable!("a mitre is cut on a plane");
+                    };
+                    closes[*i][ei] = cross(0, Some((origin, keep)));
+                    closes[*j][ej] = cross(1, Some((origin, keep)));
                     continue;
                 }
                 // At a convex corner each edge runs on past the vertex into air, so each piece runs
@@ -817,6 +860,26 @@ fn blend_settled(
                     ends[*i][ei] = through(body, &picked[*i], &outlines[*i], v)?;
                     ends[*j][ej] = through(body, &picked[*j], &outlines[*j], v)?;
                     creases.push([(*i, ei), (*j, ej)]);
+                    // Between plane walls the two blend faces can be built outright as well.
+                    closes[*i][ei] = cross(0, None);
+                    closes[*j][ej] = cross(1, None);
+                    continue;
+                }
+                // Across a sharp edge between two plane walls, no plane mirroring one piece onto
+                // the other, the two blend surfaces cross on a curve of their own.
+                if crosses_past(body, &picked, &sections, (*i, *j), v) {
+                    ends[*i][ei] = free_end(body, &picked[*i], &outlines[*i], v)?;
+                    ends[*j][ej] = free_end(body, &picked[*j], &outlines[*j], v)?;
+                    closes[*i][ei] = cross(0, None);
+                    closes[*j][ej] = cross(1, None);
+                    let at = body.vertex(v).point;
+                    crossed.get_or_insert(format!(
+                        "{} that cross past the corner at ({:.3}, {:.3}, {:.3})",
+                        plural(kind),
+                        at.x,
+                        at.y,
+                        at.z
+                    ));
                     continue;
                 }
                 {
@@ -922,6 +985,72 @@ fn blend_settled(
         };
         return blend_settled(body, pairs, skip, asked, kind, feature, swing, true);
     }
+
+    // Where every piece ends square, on a plane or at a corner with one other, each blend face is
+    // built outright and sewn, with no tool to cut.
+    let outright = closes
+        .iter()
+        .map(|c| Some([c[0]?, c[1]?]))
+        .collect::<Option<Vec<_>>>()
+        .filter(|_| {
+            swallowed.is_empty()
+                && saddles.is_empty()
+                && corners.is_empty()
+                && ridges.is_empty()
+                && flats.is_empty()
+                && !cornered
+                && spills.iter().all(|s| s.is_empty())
+                && outlines.iter().all(|o| !o.pole)
+        });
+    #[cfg(test)]
+    let outright = outright.filter(|_| !matches!(FORCE.get(), Some(Method::Tools)));
+    let outright = outright.map(|closes| {
+        let names: Vec<BTreeSet<FaceName>> = picked
+            .iter()
+            .map(|pk| {
+                pk.pairs
+                    .iter()
+                    .map(|&p| kind.face_name(feature, p))
+                    .collect()
+            })
+            .collect();
+        let convex: Vec<bool> = sections.iter().map(|s| s.convex).collect();
+        strip::strips(
+            body, &picked, &sections, &outlines, &closes, &joints, feature,
+        )
+        .and_then(|(strips, hosts)| {
+            sew::sewn_strips(body, &picked, strips, &hosts, &convex, &names, feature)
+        })
+    });
+    if let Some(corner) = crossed {
+        return match outright {
+            Some(Ok(out)) => Ok(out),
+            Some(Err(why)) => Err(Error::Unsupported(format!("{corner}: {why}"))),
+            None => Err(Error::Unsupported(format!(
+                "{corner}, beside an end or a corner that is cut and not sewn"
+            ))),
+        };
+    }
+    let outright = match outright {
+        Some(Ok(out)) if !verifying() => {
+            #[cfg(test)]
+            let sewn_asked = !matches!(FORCE.get(), Some(Method::Tools));
+            #[cfg(not(test))]
+            let sewn_asked = true;
+            if sewn_asked {
+                return Ok(out);
+            }
+            Some(out)
+        }
+        Some(Ok(out)) => Some(out),
+        Some(Err(why)) => {
+            if verifying() {
+                eprintln!("springrep-blend: {feature} not built outright ({why})");
+            }
+            None
+        }
+        None => None,
+    };
 
     // A piece whose corner balls take its whole edge has no tool: the balls meet on the end
     // section they share.
@@ -1042,6 +1171,10 @@ fn blend_settled(
         })
     } else {
         Err("a fillet with a corner patch".to_string())
+    };
+    let sewn = match outright {
+        Some(out) => Ok(out),
+        None => sewn,
     };
     let saddled = |out: Result<Brep>| -> Result<Brep> {
         let mut out = out?;
@@ -1936,28 +2069,7 @@ fn outline(s: &Section, kind: Kind) -> Result<Outline> {
                 _ => {}
             }
         }
-        let nearest = segments
-            .iter()
-            .map(|sg| match &sg.segment {
-                Segment::Line { a, b } => a.x.min(b.x),
-                Segment::Arc {
-                    center,
-                    radius,
-                    start,
-                    sweep,
-                } => {
-                    let ends = (center.x + radius * start.cos())
-                        .min(center.x + radius * (start + sweep).cos());
-                    let k = ((start.min(start + sweep) - PI) / TAU).ceil();
-                    if PI + k * TAU <= start.max(start + sweep) {
-                        center.x - radius
-                    } else {
-                        ends
-                    }
-                }
-                _ => f64::INFINITY,
-            })
-            .fold(f64::INFINITY, f64::min);
+        let nearest = nearest_axis(&segments);
         if nearest < -tol::LINEAR {
             return Err(Error::Unsupported(
                 "a blend about a circular edge that reaches past its axis".into(),
@@ -1990,16 +2102,7 @@ fn outline(s: &Section, kind: Kind) -> Result<Outline> {
         let w = t[k].dist(p);
         reach[k] = (unit2(t[k] - p).unwrap_or(s.m[k]), w);
     }
-    let mut radius = 0.0f64;
-    for sg in &segments {
-        radius = radius.max(sg.segment.start().dist(p));
-        if let Segment::Arc {
-            center, radius: r, ..
-        } = sg.segment
-        {
-            radius = radius.max(center.dist(p) + r);
-        }
-    }
+    let radius = farthest(&segments, p);
     Ok(Outline {
         profile: Profile {
             loops: vec![ProfileLoop { segments }],
@@ -2580,21 +2683,26 @@ fn continues(
             .all(|p| b.iter().any(|q| p.dist(*q) <= tol::LINEAR))
 }
 
-/// Two straight pieces that meet at a corner `v` of a plane both their edges bound, each the
-/// mirror image of the other across the plane between their other faces, end on that plane.
+/// Whether the mirror in the plane through `at` with unit normal `n` takes `s` to itself, for the
+/// surfaces two plane walls can both meet in a line or a circle.
+fn mirrors_itself(s: &Surface, at: Point3, n: Vec3) -> bool {
+    match s {
+        Surface::Plane(p) => p.frame.z.dot(n).abs() <= tol::TANGENT,
+        Surface::Sphere(sp) => (sp.frame.origin - at).dot(n).abs() <= tol::LINEAR,
+        _ => false,
+    }
+}
+
+/// Two pieces that meet at a corner `v` of a face both their edges bound, each the mirror image
+/// of the other: the mirror in the plane between their other faces, both planes, takes the shared
+/// face's surface to itself. Their blend surfaces then cross on that plane, where both end.
 fn mitre(
     body: &Brep,
     picked: &[Picked],
-    sections: &[Section],
     (i, j): (usize, usize),
     v: VertexId,
 ) -> Result<Option<[Clip; 2]>> {
     let (a, b) = (&picked[i], &picked[j]);
-    if !matches!(sections[i].path, Path::Prism { .. })
-        || !matches!(sections[j].path, Path::Prism { .. })
-    {
-        return Ok(None);
-    }
     let shared: Vec<FaceId> = a
         .faces
         .iter()
@@ -2612,7 +2720,7 @@ fn mitre(
     };
     let (wa, wb) = (wall(a), wall(b));
     let plane = |f: FaceId| matches!(body.face(f).surface, Surface::Plane(_));
-    if !(plane(*common) && plane(wa) && plane(wb)) {
+    if !(plane(wa) && plane(wb)) {
         return Ok(None);
     }
     let at = body.vertex(v).point;
@@ -2620,7 +2728,7 @@ fn mitre(
     let Some(mid) = (na - nb).unit() else {
         return Ok(None);
     };
-    if outward(body, *common, at).dot(mid).abs() > tol::TANGENT {
+    if !mirrors_itself(&body.face(*common).surface, at, mid) {
         return Ok(None);
     }
     let keep = |pk: &Picked| {
@@ -2629,6 +2737,61 @@ fn mitre(
         Clip::Plane { origin: at, keep }
     };
     Ok(Some([keep(a), keep(b)]))
+}
+
+/// The plane of the wall of `pk` that `other` does not share, as a point of it and its outward
+/// normal at `at`; none where that face is not a plane.
+fn wall_plane(body: &Brep, pk: &Picked, other: &Picked, at: Point3) -> Option<(Point3, Vec3)> {
+    let wall = pk.faces.into_iter().find(|f| !other.faces.contains(f))?;
+    match &body.face(wall).surface {
+        Surface::Plane(p) => Some((p.frame.origin, outward(body, wall, at))),
+        _ => None,
+    }
+}
+
+/// Whether blends `i` and `j`, both convex or both concave and sharing one face at a vertex of
+/// exactly three faces, meet across a sharp edge between their plane walls, so their surfaces
+/// cross at the corner ([`strip`]): a post's upright edge between two foot rounds, a square
+/// hole's between two rounds of its rim, a bar's between two rounds of its end.
+fn crosses_past(
+    body: &Brep,
+    picked: &[Picked],
+    sections: &[Section],
+    (i, j): (usize, usize),
+    v: VertexId,
+) -> bool {
+    if sections[i].convex != sections[j].convex || faces_at(body, v).len() != 3 {
+        return false;
+    }
+    let (a, b) = (&picked[i], &picked[j]);
+    let wall =
+        |pk: &Picked, other: &Picked| pk.faces.into_iter().find(|f| !other.faces.contains(f));
+    let (Some(wa), Some(wb)) = (wall(a, b), wall(b, a)) else {
+        return false;
+    };
+    let plane = |f: FaceId| matches!(body.face(f).surface, Surface::Plane(_));
+    plane(wa) && plane(wb) && bend_between(body, picked, (i, j), v).is_some()
+}
+
+/// Whether the edge at `v` between the walls of pieces `i` and `j`, the faces they do not share,
+/// is convex; none where there is no such edge, or its faces meet tangentially.
+fn bend_between(
+    body: &Brep,
+    picked: &[Picked],
+    (i, j): (usize, usize),
+    v: VertexId,
+) -> Option<bool> {
+    let (a, b) = (&picked[i], &picked[j]);
+    let wall =
+        |pk: &Picked, other: &Picked| pk.faces.into_iter().find(|f| !other.faces.contains(f));
+    let (wa, wb) = (wall(a, b)?, wall(b, a)?);
+    body.coedge_ids()
+        .filter(|&c| {
+            let faces = [Some(body.coedge_face(c)), run::across(body, c)];
+            body.coedge_start(c) == v
+                && (faces == [Some(wa), Some(wb)] || faces == [Some(wb), Some(wa)])
+        })
+        .find_map(|c| run::convex(body, c))
 }
 
 /// An end that runs on through the one other face at `v` into the air past it and stops square to
@@ -2939,10 +3102,7 @@ fn trimmed(
             continue;
         }
         let (at, ext, _) = end_reach(s, o, ends[k], k)?;
-        // `radius` bounds a section by whole circles; the faces past the end lie close to it, so
-        // their trims reach only as far as the section's true extent.
-        let tight = extent(s, o);
-        let reach = 1.25 * (ext.max(0.0) * tight / o.radius + tight);
+        let reach = 1.25 * (ext.max(0.0) + o.radius);
         for clip in &bk.extra {
             tool = clipped(&tool, clip, at, reach, feature)?;
         }
@@ -2969,11 +3129,20 @@ fn spilled(body: &Brep, mut tool: Brep, spills: &[Spill], feature: &str) -> Resu
     Ok(tool)
 }
 
-/// The largest distance from the edge of any point of a section's outline.
-fn extent(s: &Section, o: &Outline) -> f64 {
-    let p = s.p;
+/// Whether an arc from the angle `start` through `sweep` passes the angle `a`.
+fn sweeps(start: f64, sweep: f64, a: f64) -> bool {
+    let into = (a - start).rem_euclid(TAU);
+    if sweep >= 0.0 {
+        into <= sweep
+    } else {
+        into - TAU >= sweep
+    }
+}
+
+/// The largest distance from `p` of any point of `segments`.
+fn farthest(segments: &[NamedSegment], p: Vec2) -> f64 {
     let mut far = 0.0f64;
-    for sg in o.profile.loops.iter().flat_map(|l| &l.segments) {
+    for sg in segments {
         far = far
             .max(sg.segment.start().dist(p))
             .max(sg.segment.end().dist(p));
@@ -2983,16 +3152,9 @@ fn extent(s: &Section, o: &Outline) -> f64 {
             start,
             sweep,
         } = sg.segment
+            && sweeps(start, sweep, angle(center - p))
         {
-            let into = (angle(center - p) - start).rem_euclid(TAU);
-            let swept = if sweep >= 0.0 {
-                into <= sweep
-            } else {
-                into - TAU >= sweep
-            };
-            if swept {
-                far = far.max(center.dist(p) + radius);
-            }
+            far = far.max(center.dist(p) + radius);
         }
     }
     far
@@ -3007,6 +3169,29 @@ fn whole_edge(s: &Section, ends: [End; 2]) -> Option<f64> {
     };
     let at = s.path.place(s.p, false);
     tol::within((length - a - b).abs(), tol::LINEAR, at).then_some(length / (a + b))
+}
+
+/// The least distance from a ring's axis of any point of its section's `segments`.
+fn nearest_axis(segments: &[NamedSegment]) -> f64 {
+    segments
+        .iter()
+        .map(|sg| match sg.segment {
+            Segment::Line { a, b } => a.x.min(b.x),
+            Segment::Arc {
+                center,
+                radius,
+                start,
+                sweep,
+            } => {
+                if sweeps(start, sweep, PI) {
+                    center.x - radius
+                } else {
+                    sg.segment.start().x.min(sg.segment.end().x)
+                }
+            }
+            _ => f64::INFINITY,
+        })
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Whether a straight piece's corner balls take its whole edge, so it leaves no material.
@@ -3029,6 +3214,33 @@ fn spine(s: &Section, ends: [End; 2], radius: f64) -> Option<[Point3; 2]> {
         }
     }
     Some(z.map(|z| frame.to_world(Vec3::new(c.x, c.y, z))))
+}
+
+/// Where the plane through `origin` square to `normal` holds a ring's axis, how far past end `k`
+/// of the ring's span from `t0` the nearer of its two half planes lies.
+fn meridian_past(
+    circle: &Frame,
+    t0: f64,
+    span: f64,
+    k: usize,
+    origin: Point3,
+    normal: Vec3,
+) -> Option<f64> {
+    if normal.dot(circle.z).abs() > tol::ANGULAR
+        || (origin - circle.origin).dot(normal).abs() > tol::LINEAR
+    {
+        return None;
+    }
+    let d = circle.z.cross(normal);
+    let at = d.dot(circle.y).atan2(d.dot(circle.x));
+    let end = if k == 0 { t0 } else { t0 + span };
+    let wrap = |x: f64| (x + PI).rem_euclid(TAU) - PI;
+    let past = [at, at + PI]
+        .map(|a| wrap(a - end))
+        .into_iter()
+        .min_by(|x, y| x.abs().total_cmp(&y.abs()))
+        .expect("two half planes");
+    Some(if k == 0 { -past } else { past })
 }
 
 /// The solid of one picked edge's blend material, finished at both ends.
@@ -3060,33 +3272,10 @@ fn piece(s: &Section, o: &Outline, ends: [End; 2], feature: &str) -> Result<Brep
             span,
             full,
         } => {
-            let inner = o
-                .profile
-                .loops
-                .iter()
-                .flat_map(|l| &l.segments)
-                .map(|sg| match sg.segment {
-                    Segment::Line { a, b } => a.x.min(b.x),
-                    Segment::Arc { center, radius, .. } => center.x - radius,
-                    _ => f64::INFINITY,
-                })
-                .fold(f64::INFINITY, f64::min);
+            let inner = nearest_axis(&o.profile.loops[0].segments);
             let meridians = [0, 1].map(|k| match ends[k] {
-                End::Trim(Clip::Plane { origin, keep })
-                    if keep.dot(circle.z).abs() <= tol::ANGULAR
-                        && (origin - circle.origin).dot(keep).abs() <= tol::LINEAR =>
-                {
-                    // The half plane nearest this end, and how far past the end it lies.
-                    let d = circle.z.cross(keep);
-                    let at = d.dot(circle.y).atan2(d.dot(circle.x));
-                    let end = if k == 0 { t0 } else { t0 + span };
-                    let wrap = |x: f64| (x + PI).rem_euclid(TAU) - PI;
-                    let past = [at, at + PI]
-                        .map(|a| wrap(a - end))
-                        .into_iter()
-                        .min_by(|x, y| x.abs().total_cmp(&y.abs()))
-                        .expect("two half planes");
-                    Some(if k == 0 { -past } else { past })
+                End::Trim(Clip::Plane { origin, keep }) => {
+                    meridian_past(&circle, t0, span, k, origin, keep)
                 }
                 _ => None,
             });

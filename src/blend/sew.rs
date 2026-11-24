@@ -15,12 +15,12 @@ use std::collections::{BTreeSet, HashMap};
 use super::{Ball, Picked, SIDES, run::Beyond};
 use crate::{
     boolean::{
-        csi::{curve_distance, signed_distance},
+        csi::{curve_curve, curve_distance, signed_distance},
         same_domain, unify,
     },
     check,
     geom::{Curve, Surface},
-    math::{Point3, Vec3},
+    math::{Aabb, Point3, Vec3},
     tol,
     topo::{Brep, CoedgeId, CoedgeSpec, EdgeId, FaceId, FaceName, PCurve, VertexId},
 };
@@ -79,7 +79,7 @@ fn role(tool: &Brep, f: FaceId, i: usize) -> Role {
 
 /// What an edge of a piece's blend faces is.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Use {
+pub(super) enum Use {
     /// Where the blend leaves the picked edge's face `k`.
     Contact(usize),
     /// Where the blend ends, on a face of the body or on the next piece's end.
@@ -161,9 +161,6 @@ pub(super) fn sewn(
     balls: &[(Vec<usize>, Ball)],
     feature: &str,
 ) -> Result<Brep, String> {
-    if body.has_tolerances() {
-        return Err("a body with local tolerances".into());
-    }
     let parts: Vec<Parts> = tools
         .iter()
         .enumerate()
@@ -176,6 +173,70 @@ pub(super) fn sewn(
         })
         .collect::<Option<_>>()
         .ok_or("a tool whose blend faces meet it other than at its sides and ends")?;
+    let hosts: Vec<usize> = (0..tools.len()).collect();
+    sewn_parts(
+        body, picked, tools, parts, &hosts, false, beyond, convex, names, balls, feature,
+    )
+}
+
+/// [`sewn`] of pieces each built as its blend face alone ([`super::strip`]), which ends on
+/// nothing past its own edge and closes no corner with a ball. Piece `i` lies on the strip of
+/// piece `hosts[i]`, and has none where that is another piece.
+pub(super) fn sewn_strips(
+    body: &Brep,
+    picked: &[Picked],
+    strips: Vec<Option<super::strip::Strip>>,
+    hosts: &[usize],
+    convex: &[bool],
+    names: &[BTreeSet<FaceName>],
+    feature: &str,
+) -> Result<Brep, String> {
+    let mut tools = Vec::with_capacity(strips.len());
+    let mut parts = Vec::with_capacity(strips.len());
+    for strip in strips {
+        let (face, uses) = match strip {
+            Some(strip) => (Some(strip.face), strip.uses),
+            None => (None, Vec::new()),
+        };
+        parts.push(Parts {
+            blends: face.iter().flat_map(Brep::face_ids).collect(),
+            uses,
+        });
+        tools.push(face);
+    }
+    let beyond = vec![[Beyond::default(), Beyond::default()]; tools.len()];
+    sewn_parts(
+        body,
+        picked,
+        &tools,
+        parts,
+        hosts,
+        true,
+        &beyond,
+        convex,
+        names,
+        &[],
+        feature,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sewn_parts(
+    body: &Brep,
+    picked: &[Picked],
+    tools: &[Option<Brep>],
+    parts: Vec<Parts>,
+    hosts: &[usize],
+    alone: bool,
+    beyond: &[[Beyond; 2]],
+    convex: &[bool],
+    names: &[BTreeSet<FaceName>],
+    balls: &[(Vec<usize>, Ball)],
+    feature: &str,
+) -> Result<Brep, String> {
+    if body.has_tolerances() {
+        return Err("a body with local tolerances".into());
+    }
     let picked_of: HashMap<EdgeId, usize> = picked
         .iter()
         .enumerate()
@@ -201,6 +262,18 @@ pub(super) fn sewn(
             dropped.extend(bk.dropped.iter().copied());
         }
     }
+
+    swallow(
+        body,
+        picked,
+        tools,
+        &parts,
+        hosts,
+        &picked_of,
+        &mut gone,
+        &mut near,
+        &mut dropped,
+    );
 
     let mut out = Brep::new();
     let mut vmap: Vec<Option<VertexId>> = vec![None; body.vertex_ids().count()];
@@ -237,9 +310,9 @@ pub(super) fn sewn(
             }
         }
     }
-    let points: Vec<BTreeSet<VertexId>> = tvmap
+    let points: Vec<BTreeSet<VertexId>> = hosts
         .iter()
-        .map(|m| m.values().copied().collect())
+        .map(|&h| tvmap[h].values().copied().collect())
         .collect();
     for &w in &pool {
         let p = out.vertex(w).point;
@@ -325,9 +398,21 @@ pub(super) fn sewn(
                     corner.z
                 ));
             };
-            if hits.iter().any(|h| h.0 != w) {
-                return Err("an edge at a blend's end that two contact curves meet".into());
-            }
+            // Strips that cross past a corner at nearly one height bring two of their corners
+            // to this edge within the tolerance: it ends at the farther, where the higher strip's
+            // contact does, and the strip's own end runs on from there to the nearer.
+            let (w, t) = if hits.iter().any(|h| h.0 != w) {
+                if !alone {
+                    return Err("an edge at a blend's end that two contact curves meet".into());
+                }
+                let far = |h: &&(VertexId, f64)| out.vertex(h.0).point.dist(corner);
+                *hits
+                    .iter()
+                    .max_by(|a, b| far(a).total_cmp(&far(b)))
+                    .expect("two hits")
+            } else {
+                (w, t)
+            };
             ends[e.index()][k] = Some(w);
             if k == 0 {
                 ranges[e.index()].0 = t;
@@ -399,7 +484,15 @@ pub(super) fn sewn(
                     let xe = out.edge(x);
                     let ends_match =
                         (xe.start == s && xe.end == t) || (xe.start == t && xe.end == s);
-                    (ends_match && m.dist(mid) <= tol::LINEAR).then_some((x, xe.start != s))
+                    // Two pieces' cuts of one curve need not run along it at the same pace.
+                    let on = || {
+                        m.dist(mid) <= tol::LINEAR
+                            || xe
+                                .curve
+                                .as_ref()
+                                .is_some_and(|c| curve_distance(c, xe.range, mid).0 <= tol::LINEAR)
+                    };
+                    (ends_match && on()).then_some((x, xe.start != s))
                 });
                 if let Some((x, flipped)) = same {
                     if matches!(u, Use::Contact(_)) {
@@ -437,6 +530,11 @@ pub(super) fn sewn(
 
     // The body's faces, each a face of the input (`Some(0)` to the checker) or one the blend
     // changed.
+    let kept: BTreeSet<EdgeId> = body
+        .edge_ids()
+        .filter(|&e| ranges[e.index()] == body.edge(e).range)
+        .filter_map(|e| emap[e.index()])
+        .collect();
     let mut fmap: Vec<Option<FaceId>> = Vec::with_capacity(body.face_count());
     let mut sides: Vec<Option<usize>> = Vec::new();
     for f in body.face_ids() {
@@ -452,6 +550,7 @@ pub(super) fn sewn(
                     picked_of: &picked_of,
                     parts: &parts,
                     tools,
+                    hosts,
                     tmap: &tmap,
                     emap: &emap,
                     ranges: &ranges,
@@ -475,7 +574,17 @@ pub(super) fn sewn(
         let nf = out.add_face(face.surface.clone(), face.reversed, face.names.clone());
         fmap.push(Some(nf));
         for specs in loops {
-            out.add_loop(nf, specs);
+            let lp = out.add_loop(nf, specs);
+            if touched {
+                out.continue_loop(lp);
+            }
+        }
+        if touched && let Some(at) = crossed(&out, nf, &|x| !kept.contains(&x)) {
+            return Err(format!(
+                "a blend whose edge on a face crosses another edge of that face at ({:.3}, {:.3}, \
+                 {:.3})",
+                at.x, at.y, at.z
+            ));
         }
         sides.push((!touched).then_some(0));
     }
@@ -568,6 +677,187 @@ pub(super) fn sewn(
     Ok(out)
 }
 
+/// Where an edge of face `f` that is `fresh`, one the blend made or cut back, meets another edge
+/// of the face away from a vertex the two share. A contact curve that reaches over an edge of
+/// its face (a ball's seam beside the post) would leave the face's boundary crossing itself,
+/// which the faces' integrals do not show. At a pole a face may touch itself: a contact through
+/// the pole meets the seam's end there and crosses nothing.
+fn crossed(out: &Brep, f: FaceId, fresh: &dyn Fn(EdgeId) -> bool) -> Option<Point3> {
+    let mut edges: Vec<EdgeId> = Vec::new();
+    let mut poles: Vec<Point3> = Vec::new();
+    for &lp in &out.face(f).loops {
+        for &c in &out.lp(lp).coedges {
+            let e = out.coedge(c).edge;
+            if out.edge(e).curve.is_none() {
+                poles.push(out.vertex(out.edge(e).start).point);
+            } else if !edges.contains(&e) {
+                edges.push(e);
+            }
+        }
+    }
+    let is_fresh: Vec<bool> = edges.iter().map(|&e| fresh(e)).collect();
+    // Edges whose boxes stand clear of each other by more than the tolerance do not meet, so a
+    // loop of many edges is searched only where neighbours come together.
+    let pad = Vec3::new(1.0, 1.0, 1.0) * (2.0 * tol::LINEAR);
+    let boxes: Vec<Aabb> = edges
+        .iter()
+        .map(|&e| {
+            let edge = out.edge(e);
+            let curve = edge.curve.as_ref().expect("kept above");
+            let tight = curve.bbox(edge.range.0, edge.range.1);
+            Aabb {
+                min: tight.min - pad,
+                max: tight.max + pad,
+            }
+        })
+        .collect();
+    let apart = |i: usize, j: usize| {
+        (0..3).any(|k| boxes[i].min[k] > boxes[j].max[k] || boxes[j].min[k] > boxes[i].max[k])
+    };
+    for (i, &a) in edges.iter().enumerate() {
+        for (j, &b) in edges.iter().enumerate().skip(i + 1) {
+            if (!is_fresh[i] && !is_fresh[j]) || apart(i, j) {
+                continue;
+            }
+            let (ea, eb) = (out.edge(a), out.edge(b));
+            let (Some(ca), Some(cb)) = (&ea.curve, &eb.curve) else {
+                continue;
+            };
+            let at_pole = |p: Point3| poles.iter().any(|q| q.dist(p) <= tol::LINEAR);
+            let hits = curve_curve(ca, ea.range, cb, eb.range);
+            let shared = |p: Point3| at_shared_vertex(out, a, b, p);
+            if let Some(p) = hits.into_iter().find(|&p| !shared(p) && !at_pole(p)) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Whether `p`, where edges `a` and `b` meet, is at a vertex the two share. Two edges that leave
+/// a vertex tangent to each other, as a blend's end and the edge of the face it touches do, run
+/// within the tolerance of each other for a stretch, and are found to meet anywhere along it.
+fn at_shared_vertex(out: &Brep, a: EdgeId, b: EdgeId, p: Point3) -> bool {
+    let (ea, eb) = (out.edge(a), out.edge(b));
+    let (Some(ca), Some(cb)) = (&ea.curve, &eb.curve) else {
+        return false;
+    };
+    [ea.start, ea.end].iter().any(|v| {
+        if ![eb.start, eb.end].contains(v) {
+            return false;
+        }
+        let at = out.vertex(*v).point;
+        if at.dist(p) <= tol::LINEAR {
+            return true;
+        }
+        // A closed edge's vertex lies at both ends of its range: the stretch runs from the end
+        // nearer `p`.
+        let to = ca.project(p, ea.range.0, ea.range.1);
+        let mut from = ca.project(at, ea.range.0, ea.range.1);
+        let span = ea.range.1 - ea.range.0;
+        if ea.start == ea.end && (to - from).abs() > 0.5 * span {
+            from += if to > from { span } else { -span };
+        }
+        (1..=4).all(|k| {
+            let q = ca.eval(from + (to - from) * k as f64 / 4.0);
+            curve_distance(cb, eb.range, q).0 <= 2.0 * tol::LINEAR
+        })
+    })
+}
+
+/// The edges that lie wholly under the blend where they leave a picked edge's end `v` along the
+/// section there: an edge in the plane through `v` square to the picked edges, on which the next
+/// vertex of the blend lies past its far end. That stretch of the plane's cut of the face, from
+/// `v` to the blend's vertex, is the section's own foot on the face, so the edge, its far vertex
+/// and a pole there go with the blend (a ball's seam from a wall's foot to the pole, where the
+/// round reaches over the pole).
+#[allow(clippy::too_many_arguments)]
+fn swallow(
+    body: &Brep,
+    picked: &[Picked],
+    tools: &[Option<Brep>],
+    parts: &[Parts],
+    hosts: &[usize],
+    picked_of: &HashMap<EdgeId, usize>,
+    gone: &mut BTreeSet<VertexId>,
+    near: &mut HashMap<VertexId, BTreeSet<usize>>,
+    dropped: &mut BTreeSet<EdgeId>,
+) {
+    let tips = |i: usize| {
+        let i = hosts[i];
+        let tool = tools[i].iter();
+        tool.flat_map(move |tool| {
+            parts[i].uses.iter().flat_map(move |&(e, _)| {
+                let edge = tool.edge(e);
+                [edge.start, edge.end].map(|v| tool.vertex(v).point)
+            })
+        })
+    };
+    let mut under: Vec<(EdgeId, VertexId, VertexId)> = Vec::new();
+    for e in body.edge_ids() {
+        if picked_of.contains_key(&e) || dropped.contains(&e) {
+            continue;
+        }
+        let edge = body.edge(e);
+        let Some(curve) = &edge.curve else { continue };
+        let (k, v, far) = match (gone.contains(&edge.start), gone.contains(&edge.end)) {
+            (true, false) => (0, edge.start, edge.end),
+            (false, true) => (1, edge.end, edge.start),
+            _ => continue,
+        };
+        let span = edge.range.1 - edge.range.0;
+        // Past the far end, and nearer it than the end at `v` round a circle.
+        let more = match curve {
+            Curve::Line(_) => 1e3 * span.max(1.0),
+            Curve::Circle(_) => 0.5 * (std::f64::consts::TAU - span),
+            _ => continue,
+        };
+        let (from, past) = if k == 0 {
+            (edge.range.0, (edge.range.1, edge.range.1 + more))
+        } else {
+            (edge.range.1, (edge.range.0 - more, edge.range.0))
+        };
+        let corner = body.vertex(v).point;
+        let Some(along) = near[&v]
+            .iter()
+            .map(|&i| super::leaving(body, picked[i].edge, v))
+            .collect::<Option<Vec<Vec3>>>()
+        else {
+            continue;
+        };
+        let on_section = |p: Point3| {
+            along
+                .iter()
+                .all(|d| (p - corner).dot(*d).abs() <= tol::LINEAR)
+        };
+        let hit = |range: (f64, f64)| {
+            near[&v].iter().flat_map(|&i| tips(i)).find_map(|p| {
+                let (d, t) = curve_distance(curve, range, p);
+                (d <= tol::LINEAR && p.dist(corner) > tol::LINEAR).then_some(t)
+            })
+        };
+        if hit(edge.range).is_some() {
+            continue;
+        }
+        let Some(t) = hit(past) else { continue };
+        if (1..=8).all(|j| on_section(curve.eval(from + (t - from) * j as f64 / 8.0))) {
+            under.push((e, v, far));
+        }
+    }
+    for (e, v, far) in under {
+        dropped.insert(e);
+        gone.insert(far);
+        let by = near[&v].clone();
+        near.entry(far).or_default().extend(by);
+        for x in body.edge_ids() {
+            let edge = body.edge(x);
+            if edge.curve.is_none() && edge.start == far {
+                dropped.insert(x);
+            }
+        }
+    }
+}
+
 /// The sphere patch closing a corner where the pieces `at` stop short: bounded by each one's end
 /// section, an arc of a great circle of the sphere, and facing out of the body.
 fn corner_face(
@@ -654,6 +944,8 @@ struct Rebuild<'a> {
     picked_of: &'a HashMap<EdgeId, usize>,
     parts: &'a [Parts],
     tools: &'a [Option<Brep>],
+    /// The piece whose tool carries each piece's blend.
+    hosts: &'a [usize],
     tmap: &'a [HashMap<EdgeId, Mapped>],
     emap: &'a [Option<EdgeId>],
     ranges: &'a [(f64, f64)],
@@ -698,35 +990,54 @@ fn rebuild_loop(
         if let Some(&i) = r.picked_of.get(&co.edge) {
             changed = true;
             // The corners at the two ends of a piece with no tool meet where it would lie.
-            let Some(tool) = &r.tools[i] else { continue };
-            let k = r.picked[i]
+            let h = r.hosts[i];
+            let Some(tool) = &r.tools[h] else { continue };
+            let k = r.picked[h]
                 .faces
                 .iter()
                 .position(|&g| g == body.lp(lp).face)
                 .ok_or("a picked edge on a face it does not join")?;
-            let contacts: Vec<EdgeId> = r.parts[i]
+            let contacts: Vec<EdgeId> = r.parts[h]
                 .uses
                 .iter()
                 .filter(|u| u.1 == Use::Contact(k))
                 .map(|u| u.0)
                 .collect();
+            let curve = edge.curve.as_ref().expect("a picked edge has a curve");
+            let tm = 0.5 * (edge.range.0 + edge.range.1);
+            let (p, d) = curve.d1(tm);
+            let shared = r.hosts.iter().filter(|&&x| x == h).count() > 1;
             let ce = match contacts.as_slice() {
                 [ce] => ce,
                 // The blend meets this face only at a pole, where its neighbours' contacts meet.
-                [] if r.parts[i].uses.iter().any(|u| u.1 == Use::Pole) => continue,
+                [] if r.parts[h].uses.iter().any(|u| u.1 == Use::Pole) => continue,
+                // A strip two pieces lie on has its contact in a stretch for each where another
+                // edge of the face ends between them: the one this piece's section crosses, which
+                // holds the contact's nearest point to the middle of the piece's edge.
+                [_, _] if shared => {
+                    let off = |ce: &&EdgeId| {
+                        let x = tool.edge(**ce);
+                        let c = x.curve.as_ref().expect("checked in parts");
+                        curve_distance(c, x.range, p).0
+                    };
+                    let nearest = contacts.iter().min_by(|a, b| off(a).total_cmp(&off(b)));
+                    nearest.expect("two contacts")
+                }
                 _ => {
                     return Err("a piece with its contact on a face in other than one edge".into());
                 }
             };
             let tc = tool.edge(*ce);
             let tcurve = tc.curve.as_ref().expect("checked in parts");
-            let curve = edge.curve.as_ref().expect("a picked edge has a curve");
-            let tm = 0.5 * (edge.range.0 + edge.range.1);
-            let (p, d) = curve.d1(tm);
             let d = if co.reversed { -d } else { d };
             let (_, s) = curve_distance(tcurve, tc.range, p);
-            let m = r.tmap[i][ce];
+            let m = r.tmap[h][ce];
             let reversed = (tcurve.d1(s).1.dot(d) < 0.0) != m.flipped;
+            // One contact two pieces lie on stands for both their edges.
+            let same = |x: &(CoedgeSpec, CoedgeId)| x.0.edge == m.edge && x.0.reversed == reversed;
+            if shared && specs.last().is_some_and(same) {
+                continue;
+            }
             let spec_edge = out.edge(m.edge);
             let start = if reversed {
                 spec_edge.end
@@ -775,6 +1086,13 @@ fn rebuild_loop(
     }
     if !changed {
         return Ok((specs.into_iter().map(|s| s.0).collect(), false));
+    }
+    // And where the loop starts between the two.
+    let twice = |a: &(CoedgeSpec, CoedgeId), b: &(CoedgeSpec, CoedgeId)| {
+        a.0.edge == b.0.edge && a.0.reversed == b.0.reversed
+    };
+    if specs.len() > 1 && twice(&specs[0], &specs[specs.len() - 1]) {
+        specs.pop();
     }
     let n = specs.len();
     let mut joined: Vec<CoedgeSpec> = Vec::with_capacity(n + 2);
@@ -972,6 +1290,37 @@ mod tests {
 
     fn named(b: &Brep, name: &str) -> usize {
         b.name_counts().get(name).copied().unwrap_or(0)
+    }
+
+    #[test]
+    fn a_seam_meets_a_whole_circle_at_their_vertex_from_either_end_of_its_turn() {
+        // A bore's rim circle of radius 2, a whole turn from its one vertex and back to it, and
+        // the bore's seam, a line up from that vertex. Where the two are found to meet lies
+        // within rounding of the vertex, on one side of it round the circle or the other: at
+        // the start of the circle's turn or at its end. Either is the vertex the edges share.
+        use crate::geom::{Circle, Curve, Line};
+        use std::f64::consts::TAU;
+        let mut b = Brep::new();
+        let v = b.add_vertex(Vec3::new(2.0, 0.0, 0.0));
+        let w = b.add_vertex(Vec3::new(2.0, 0.0, 5.0));
+        let circle = Curve::Circle(Circle {
+            frame: up(),
+            radius: 2.0,
+        });
+        let rim = b.add_edge(circle.clone(), (0.0, TAU), v, v);
+        let line = Curve::Line(Line {
+            origin: Vec3::new(2.0, 0.0, 0.0),
+            dir: Vec3::Z,
+        });
+        let seam = b.add_edge(line, (0.0, 5.0), v, w);
+        for turned in [1e-9, -1e-9, 0.0] {
+            let p = circle.eval(turned);
+            assert!(super::at_shared_vertex(&b, rim, seam, p), "{turned}");
+            assert!(super::at_shared_vertex(&b, seam, rim, p), "{turned}");
+        }
+        // A quarter turn on, the circle is 2√2 from the vertex and nowhere near the seam.
+        let far = circle.eval(TAU / 4.0);
+        assert!(!super::at_shared_vertex(&b, rim, seam, far));
     }
 
     #[test]

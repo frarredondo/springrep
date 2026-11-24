@@ -1,16 +1,18 @@
 //! Chamfers and fillets on small swept solids against closed-form volume and area, each result
 //! checked valid and watertight, with the blend faces named by the operation.
 
-use std::f64::consts::PI;
+use std::f64::consts::{FRAC_PI_2, PI};
 
 use springrep::{
     Error,
     blend::{chamfer, fillet},
     boolean::{difference, union},
     check,
+    geom::Surface,
     math::{Frame, Vec2, Vec3},
     measure,
     mesh::{self, MeshOptions},
+    primitive::sphere,
     profile::{NamedSegment, Profile, ProfileLoop, Segment},
     sweep::extrude,
     tol,
@@ -1190,4 +1192,956 @@ fn a_straight_edge_between_a_plane_and_a_bore_takes_a_chamfer_by_the_chord() {
     assert_solid(&b, volume, area);
     assert_eq!(names(&b, "c.bevel_0"), 1);
     assert_eq!(names(&b, "c.bevel_1"), 1);
+}
+
+/// A ball of radius `BALL` about the origin with a post standing on it up to `TOP`, `POST` square
+/// unless a test says otherwise.
+const BALL: f64 = 41.23;
+const POST: Vec2 = Vec2::new(28.5, 28.5);
+const TOP: f64 = 60.0;
+
+/// The post's sides in the order of [`Profile::rect`]'s edges, each with its outward normal.
+const WALLS: [(&str, Vec3); 4] = [
+    ("post.v_min", Vec3::new(0.0, -1.0, 0.0)),
+    ("post.u_max", Vec3::new(1.0, 0.0, 0.0)),
+    ("post.v_max", Vec3::new(0.0, 1.0, 0.0)),
+    ("post.u_min", Vec3::new(-1.0, 0.0, 0.0)),
+];
+
+fn post_on_ball(centre: Vec2, size: Vec2) -> Brep {
+    let ball = sphere(&at_z(0.0), BALL, "ball").unwrap();
+    let foot = Profile::rect(centre, size.x, size.y);
+    let post = extrude(&foot, &at_z(0.0), TOP, "post").unwrap();
+    union(&ball, &post).unwrap()
+}
+
+/// Wall `w`'s distance from the ball's centre, and where the post's middle and half its width
+/// lie along the wall.
+fn wall_place(centre: Vec2, size: Vec2, w: usize) -> (f64, f64, f64) {
+    let n = WALLS[w].1;
+    let along = Vec3::Z.cross(n);
+    let c = Vec3::new(centre.x, centre.y, 0.0);
+    let half = |v: Vec3| 0.5 * (v.x.abs() * size.x + v.y.abs() * size.y);
+    (c.dot(n) + half(n), c.dot(along), half(along))
+}
+
+/// Gauss-Legendre quadrature of `f` over `[a, b]`, five points on each of 64 panels: exact for
+/// degree 9 on each panel, so far below 1e-12 for the smooth integrands here.
+fn gauss(a: f64, b: f64, f: impl Fn(f64) -> f64) -> f64 {
+    let inner = (5.0 - 2.0 * (10.0f64 / 7.0).sqrt()).sqrt() / 3.0;
+    let outer = (5.0 + 2.0 * (10.0f64 / 7.0).sqrt()).sqrt() / 3.0;
+    let (wi, wo) = (
+        (322.0 + 13.0 * 70f64.sqrt()) / 900.0,
+        (322.0 - 13.0 * 70f64.sqrt()) / 900.0,
+    );
+    let rule = [
+        (0.0, 128.0 / 225.0),
+        (inner, wi),
+        (-inner, wi),
+        (outer, wo),
+        (-outer, wo),
+    ];
+    let panels = 64;
+    let h = (b - a) / panels as f64;
+    (0..panels)
+        .map(|k| {
+            let mid = a + (k as f64 + 0.5) * h;
+            let sum: f64 = rule.iter().map(|(x, w)| w * f(mid + 0.5 * h * x)).sum();
+            sum * 0.5 * h
+        })
+        .sum()
+}
+
+/// Where a foot blend stops along its wall, as the coordinate `y` along the wall of its end at
+/// the distance `x` from the ball's centre square to the wall: on the plane of the wall beside
+/// it, with a flat end there; on that plane under the blend of that wall, which it crosses past
+/// the corner, with no end of its own; or on the plane through the ball's centre between the two
+/// walls, `y = ±x`.
+#[derive(Clone, Copy)]
+enum Stop {
+    Wall(f64),
+    Under(f64),
+    Mitre(f64),
+}
+
+impl Stop {
+    fn at(self, x: f64) -> f64 {
+        match self {
+            Stop::Wall(y) | Stop::Under(y) => y,
+            Stop::Mitre(sign) => sign * x,
+        }
+    }
+}
+
+/// A foot blend's size: a fillet's radius, or a chamfer's setback on the wall and the ball.
+#[derive(Clone, Copy)]
+enum Size {
+    Round(f64),
+    Bevel(f64),
+}
+
+/// One foot blend, worked by hand in the half plane through the line from the ball's centre
+/// square to the wall: `x` along that line and `ρ` the distance from it. The wall is the line
+/// `x = a` and the ball the circle `x² + ρ² = R²`, meeting at the edge. A fillet's rolling ball of
+/// radius `r` touches both with its centre at `(ρc, a + r)`, `ρc² = (R + r)² − (a + r)²`; a
+/// chamfer runs straight from the wall `d` up from the edge to the ball a chord `d` from it. The
+/// blend's material is the spandrel between the three, turned about the line: a point of it at
+/// `(ρ, x)` lies between the two stops over the angle `asin(hi/ρ) − asin(lo/ρ)`.
+struct Foot {
+    /// The wall's distance from the ball's centre.
+    a: f64,
+    size: Size,
+    stops: [Stop; 2],
+}
+
+impl Foot {
+    fn edge(&self) -> f64 {
+        (BALL * BALL - self.a * self.a).sqrt()
+    }
+
+    /// A fillet's spine: its ball's distance from the line.
+    fn spine(&self, r: f64) -> f64 {
+        ((BALL + r).powi(2) - (self.a + r).powi(2)).sqrt()
+    }
+
+    /// The elevation above the `ρ` axis, seen from the ball's centre, of the blend's contact
+    /// with the wall, of the edge, and of its contact with the ball.
+    fn elevations(&self) -> [f64; 3] {
+        let edge = (self.a / BALL).asin();
+        match self.size {
+            Size::Round(r) => [
+                self.a.atan2(self.spine(r)),
+                edge,
+                ((self.a + r) / (BALL + r)).asin(),
+            ],
+            Size::Bevel(d) => [
+                self.a.atan2(self.edge() + d),
+                edge,
+                edge + 2.0 * (d / (2.0 * BALL)).asin(),
+            ],
+        }
+    }
+
+    /// The blend's section from the wall to the ball, as `(ρ, x)` and its speed `(ρ′, x′)`, over
+    /// `t` from 0 to [`Foot::last`]: a fillet's arc by the angle its ball has turned from the
+    /// wall's contact, a chamfer's line by the fraction of it.
+    fn section(&self, t: f64) -> [f64; 4] {
+        match self.size {
+            Size::Round(r) => [
+                self.spine(r) - r * t.sin(),
+                self.a + r - r * t.cos(),
+                -r * t.cos(),
+                r * t.sin(),
+            ],
+            Size::Bevel(d) => {
+                let ball = self.elevations()[2];
+                let (w, b) = (self.edge() + d, Vec2::new(ball.cos(), ball.sin()) * BALL);
+                let run = Vec2::new(b.x - w, b.y - self.a);
+                [w + t * run.x, self.a + t * run.y, run.x, run.y]
+            }
+        }
+    }
+
+    fn last(&self) -> f64 {
+        match self.size {
+            Size::Round(r) => ((self.a + r) / (BALL + r)).acos(),
+            Size::Bevel(_) => 1.0,
+        }
+    }
+
+    fn turn(&self, rho: f64, x: f64) -> f64 {
+        (self.stops[1].at(x) / rho).asin() - (self.stops[0].at(x) / rho).asin()
+    }
+
+    /// The integral of `f(ρ, x)` over the spandrel, by lines square to the wall: at the height
+    /// `x` of each point of the blend's section, from the ball out to that point. This holds
+    /// for a wall on either side of the ball's centre.
+    fn over_spandrel(&self, f: impl Fn(f64, f64) -> f64) -> f64 {
+        gauss(0.0, self.last(), |t| {
+            let [rho, x, _, d_x] = self.section(t);
+            gauss((BALL * BALL - x * x).sqrt(), rho, |q| f(q, x)) * d_x
+        })
+    }
+
+    fn volume(&self) -> f64 {
+        self.over_spandrel(|rho, x| rho * self.turn(rho, x))
+    }
+
+    /// The area the blend adds: its own face, less the strips of the wall and the ball it
+    /// covers, and the flat end it leaves on each wall it stops on.
+    fn area(&self) -> f64 {
+        let [_, edge, ball] = self.elevations();
+        let swept = |rho: f64, x: f64| rho * self.turn(rho, x);
+        let face = gauss(0.0, self.last(), |t| {
+            let [rho, x, d_rho, d_x] = self.section(t);
+            d_rho.hypot(d_x) * swept(rho, x)
+        });
+        let on_wall = gauss(self.edge(), self.section(0.0)[0], |rho| swept(rho, self.a));
+        let on_ball = gauss(edge, ball, |psi| {
+            BALL * swept(BALL * psi.cos(), BALL * psi.sin())
+        });
+        let ends: f64 = self
+            .stops
+            .iter()
+            .map(|stop| match *stop {
+                Stop::Wall(y) => self.over_spandrel(|rho, _| rho / (rho * rho - y * y).sqrt()),
+                Stop::Under(_) | Stop::Mitre(_) => 0.0,
+            })
+            .sum();
+        face - on_wall - on_ball + ends
+    }
+}
+
+/// The volume and area of the post on the ball before any blend: the ball, and the post above
+/// it, whose foot is the ball's surface over the post's rectangle.
+fn post_on_ball_measures(centre: Vec2, size: Vec2) -> (f64, f64) {
+    let (lo, hi) = (centre - size * 0.5, centre + size * 0.5);
+    let over_foot = |f: &dyn Fn(f64) -> f64| {
+        gauss(lo.x, hi.x, |x| {
+            gauss(lo.y, hi.y, |y| f(BALL * BALL - x * x - y * y))
+        })
+    };
+    let volume =
+        4.0 / 3.0 * PI * BALL.powi(3) + size.x * size.y * TOP - over_foot(&|zz: f64| zz.sqrt());
+    // A wall at the distance `a` meets the ball in a circle of radius `c`, c² = R² − a².
+    let under = |a: f64, lo: f64, hi: f64| {
+        let c = (BALL * BALL - a * a).sqrt();
+        let to = |y: f64| 0.5 * (y * (c * c - y * y).sqrt() + c * c * (y / c).asin());
+        to(hi) - to(lo)
+    };
+    let walls = 2.0 * (size.x + size.y) * TOP
+        - under(hi.x, lo.y, hi.y)
+        - under(lo.x, lo.y, hi.y)
+        - under(hi.y, lo.x, hi.x)
+        - under(lo.y, lo.x, hi.x);
+    let area =
+        4.0 * PI * BALL * BALL - over_foot(&|zz: f64| BALL / zz.sqrt()) + size.x * size.y + walls;
+    (volume, area)
+}
+
+/// The corner two foot blends cross past, worked by hand: their walls stand square to each
+/// other, `far` the one farther from the ball's centre, and `x` and `y` run square to them. Over
+/// the point `(x, y)` the far wall's blend, about the `x` axis at the distance `ρ(x)` from it,
+/// stands `√(ρ(x)² − y²)` high, the near wall's the same with the two exchanged, and the ball
+/// `√(R² − x² − y²)`; the lower blend bounds the corner. The far wall's blend is the lower along
+/// its own wall up to where the near wall's surface comes down to its contact there, the near
+/// end of the crease; from there the two cross once on every line square to either wall, out to
+/// where both contacts on the ball meet.
+struct Crossing<'a> {
+    far: &'a Foot,
+    near: &'a Foot,
+}
+
+impl Crossing<'_> {
+    /// How much higher the far blend stands than the near one over the sections `tx` and `ty`.
+    fn over(&self, tx: f64, ty: f64) -> f64 {
+        let ([rho_x, x, ..], [rho_y, y, ..]) = (self.far.section(tx), self.near.section(ty));
+        (rho_x * rho_x - y * y).sqrt() - (rho_y * rho_y - x * x).sqrt()
+    }
+
+    /// The heights of the far blend, the near blend and the ball over the sections `tx`, `ty`.
+    fn heights(&self, tx: f64, ty: f64) -> [f64; 3] {
+        let ([rho_x, x, ..], [rho_y, y, ..]) = (self.far.section(tx), self.near.section(ty));
+        [
+            (rho_x * rho_x - y * y).sqrt(),
+            (rho_y * rho_y - x * x).sqrt(),
+            (BALL * BALL - x * x - y * y).sqrt(),
+        ]
+    }
+
+    fn bisect(f: impl Fn(f64) -> f64, mut lo: f64, mut hi: f64) -> f64 {
+        assert!(f(lo) < 0.0 && f(hi) > 0.0);
+        for _ in 0..60 {
+            let mid = 0.5 * (lo + hi);
+            if f(mid) < 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        0.5 * (lo + hi)
+    }
+
+    /// The near blend's section the crease lies on over the far blend's section `tx`.
+    fn across_near(&self, tx: f64) -> f64 {
+        Self::bisect(|ty| self.over(tx, ty), 0.0, self.near.last())
+    }
+
+    /// The far blend's section the crease lies on over the near blend's section `ty`, past the
+    /// crease's near end.
+    fn across_far(&self, ty: f64) -> f64 {
+        Self::bisect(|tx| -self.over(tx, ty), 0.0, self.far.last())
+    }
+
+    /// The volume by columns: the lower blend's height above the ball over every `(x, y)`.
+    fn volume_by_columns(&self) -> f64 {
+        gauss(0.0, self.far.last(), |tx| {
+            let column = |ty: f64| {
+                let [over_far, over_near, ball] = self.heights(tx, ty);
+                (over_far.min(over_near) - ball) * self.near.section(ty)[3]
+            };
+            let crease = self.across_near(tx);
+            let low = gauss(0.0, crease, column) + gauss(crease, self.near.last(), column);
+            low * self.far.section(tx)[3]
+        })
+    }
+
+    /// The patch of the far blend's surface up to the crease, `f(ρ, x, ρ′, x′)` summed over it:
+    /// at the section `tx` it turns about the `x` axis from the near wall's plane to the crease.
+    fn on_far(&self, f: impl Fn([f64; 4]) -> f64) -> f64 {
+        gauss(0.0, self.far.last(), |tx| {
+            let s = self.far.section(tx);
+            let crease = self.near.section(self.across_near(tx))[1];
+            f(s) * s[0] * ((crease / s[0]).asin() - (self.near.a / s[0]).asin())
+        })
+    }
+
+    /// The same for the near blend's surface, which starts at the crease's near end.
+    fn on_near(&self, f: impl Fn([f64; 4]) -> f64) -> f64 {
+        gauss(self.across_near(0.0), self.near.last(), |ty| {
+            let s = self.near.section(ty);
+            let crease = self.far.section(self.across_far(ty))[1];
+            f(s) * s[0] * ((crease / s[0]).asin() - (self.far.a / s[0]).asin())
+        })
+    }
+
+    /// The ball's surface under the corner, `f(z)` summed over it.
+    fn on_ball(&self) -> f64 {
+        let (x1, y1) = (
+            self.far.section(self.far.last())[1],
+            self.near.section(self.near.last())[1],
+        );
+        gauss(self.far.a, x1, |x| {
+            gauss(self.near.a, y1, |y| {
+                BALL / (BALL * BALL - x * x - y * y).sqrt()
+            })
+        })
+    }
+
+    /// The corner's flat sides on the far wall's plane and the near wall's, and on the far
+    /// wall's the step left above the far blend's contact, under the near blend's end.
+    fn flats(&self) -> [f64; 3] {
+        let start = self.across_near(0.0);
+        let on_far_wall = |pick: fn([f64; 3]) -> f64| {
+            move |ty: f64| pick(self.heights(0.0, ty)) * self.near.section(ty)[3]
+        };
+        let far_wall = gauss(0.0, start, on_far_wall(|h| h[0] - h[2]))
+            + gauss(start, self.near.last(), on_far_wall(|h| h[1] - h[2]));
+        let step = gauss(0.0, start, on_far_wall(|h| h[1] - h[0]));
+        let near_wall = gauss(0.0, self.far.last(), |tx| {
+            let [over_far, over_near, ball] = self.heights(tx, 0.0);
+            assert!(over_far <= over_near);
+            (over_far - ball) * self.far.section(tx)[3]
+        });
+        [far_wall, near_wall, step]
+    }
+
+    /// The volume by the divergence theorem: a third of the flux of position out through the
+    /// corner's five sides. Position dotted with the outward normal is `−R` on the ball, minus
+    /// the wall's distance on each flat side, and `(ρx′ − xρ′)` over the section's speed on a
+    /// blend's surface.
+    fn volume_by_flux(&self) -> f64 {
+        let flux = |[rho, x, d_rho, d_x]: [f64; 4]| rho * d_x - x * d_rho;
+        let [far_wall, near_wall, _] = self.flats();
+        (self.on_far(flux) + self.on_near(flux)
+            - BALL * self.on_ball()
+            - self.far.a * far_wall
+            - self.near.a * near_wall)
+            / 3.0
+    }
+
+    /// The area the corner adds: the two patches and the step, less the ball it covers.
+    fn area(&self) -> f64 {
+        let speed = |[_, _, d_rho, d_x]: [f64; 4]| d_rho.hypot(d_x);
+        self.on_far(speed) + self.on_near(speed) + self.flats()[2] - self.on_ball()
+    }
+
+    /// The crease's two ends as `(x, y, z)`: where the near blend's surface comes down to the
+    /// far blend's contact on its wall, and where the two contacts on the ball meet.
+    fn ends(&self) -> [[f64; 3]; 2] {
+        let at = |tx: f64, ty: f64| {
+            let (x, y) = (self.far.section(tx)[1], self.near.section(ty)[1]);
+            [x, y, self.heights(tx, ty)[0]]
+        };
+        [
+            at(0.0, self.across_near(0.0)),
+            at(self.far.last(), self.near.last()),
+        ]
+    }
+}
+
+/// The fillet face named `name` rolls along wall `n`: it is the torus a ball of the fillet's
+/// radius sweeps touching the wall and the ball, every point of its boundary lies on that torus,
+/// on the wall's plane where it is tangent to the wall, on the ball where it is tangent to the
+/// ball, on one of the two planes it stops on, or on the torus of a fillet it crosses, one of
+/// `crossed`; and it has a boundary of each of the first two kinds.
+fn assert_rolls(b: &Brep, name: &str, n: Vec3, foot: &Foot, crossed: &[(Vec3, Foot)]) {
+    let Size::Round(r) = foot.size else {
+        panic!("a fillet's face");
+    };
+    let faces: Vec<_> = b
+        .face_ids()
+        .filter(|&f| b.face(f).names.iter().any(|x| x.to_string() == name))
+        .collect();
+    assert_eq!(faces.len(), 1, "{name}");
+    let face = b.face(faces[0]);
+    let Surface::Torus(torus) = &face.surface else {
+        panic!("{name} is a {}", face.surface.kind());
+    };
+    let exact = 1e-12 * BALL;
+    assert!(
+        (torus.frame.origin - n * (foot.a + r)).norm() <= exact,
+        "{name}"
+    );
+    assert!(torus.frame.z.cross(n).norm() <= 1e-12, "{name}");
+    assert!((torus.major - foot.spine(r)).abs() <= exact, "{name}");
+    assert!((torus.minor - r).abs() <= exact, "{name}");
+
+    let along = Vec3::Z.cross(n);
+    let near = |x: f64| x.abs() <= 1e-9 * BALL;
+    let on_torus = |q: Vec3, n: Vec3, foot: &Foot| {
+        let x = q.dot(n);
+        let rho = (q - n * x).norm();
+        near((rho - foot.spine(r)).hypot(x - foot.a - r) - r)
+    };
+    let normal = |q: Vec3| {
+        let uv = face.surface.project(q);
+        face.surface.normal(uv.x, uv.y)
+    };
+    let mut seen = [0usize; 3];
+    for &lp in &face.loops {
+        for &c in &b.lp(lp).coedges {
+            let edge = b.edge(b.coedge(c).edge);
+            let curve = edge.curve.as_ref().expect("a fillet's edges are curves");
+            let points: Vec<Vec3> = (0..=8)
+                .map(|k| curve.eval(edge.range.0 + (edge.range.1 - edge.range.0) * k as f64 / 8.0))
+                .collect();
+            assert!(points.iter().all(|&q| on_torus(q, n, foot)), "{name}");
+            // An end on the plane of the wall beside it may lie along the post's edge, on its own
+            // wall's plane too: it is an end first.
+            let stops = |stop: Stop| {
+                let on = |q: &Vec3| near(q.dot(along) - stop.at(q.dot(n)));
+                points.iter().all(on)
+            };
+            if stops(foot.stops[0]) || stops(foot.stops[1]) {
+                seen[2] += 1;
+            } else if points.iter().all(|q| near(q.dot(n) - foot.a)) {
+                assert!(points.iter().all(|&q| normal(q).cross(n).norm() <= 1e-9));
+                seen[0] += 1;
+            } else if points.iter().all(|q| near(q.norm() - BALL)) {
+                let radial = |q: Vec3| normal(q).cross(q).norm() <= 1e-9 * BALL;
+                assert!(points.iter().all(|&q| radial(q)), "{name}");
+                seen[1] += 1;
+            } else {
+                let crosses =
+                    |(m, other): &(Vec3, Foot)| points.iter().all(|&q| on_torus(q, *m, other));
+                assert!(crossed.iter().any(crosses), "{name}");
+                seen[2] += 1;
+            }
+        }
+    }
+    assert!(
+        seen[0] >= 1 && seen[1] >= 1 && seen[2] >= 2,
+        "{name}: {seen:?}"
+    );
+}
+
+/// The crease between the blend faces of walls `i` and `j`, the far and the near one, has the
+/// hand-worked ends, and two rounds touch the ball there where their contacts on it meet.
+fn assert_crease(b: &Brep, (i, far): (usize, Vec3), (j, near): (usize, Vec3), hand: &Crossing) {
+    let face = |k: usize| {
+        let name = match hand.far.size {
+            Size::Round(_) => format!("foot.round_{k}"),
+            Size::Bevel(_) => format!("foot.bevel_{k}"),
+        };
+        b.face_ids()
+            .find(|&f| b.face(f).names.iter().any(|x| x.to_string() == name))
+            .expect("a blend face")
+    };
+    let (fi, fj) = (face(i), face(j));
+    let edges_of = |f| -> Vec<_> {
+        let loops = b.face(f).loops.iter();
+        loops
+            .flat_map(|&lp| b.lp(lp).coedges.iter().map(|&c| b.coedge(c).edge))
+            .collect()
+    };
+    let shared: Vec<_> = edges_of(fi)
+        .into_iter()
+        .filter(|e| edges_of(fj).contains(e))
+        .collect();
+    assert_eq!(shared.len(), 1, "one crease between {i} and {j}");
+    let edge = b.edge(shared[0]);
+    let ends = [edge.start, edge.end].map(|v| b.vertex(v).point);
+    let round = matches!(hand.far.size, Size::Round(_));
+    // Two blends that come to the post's edge within the tolerance of one height share one
+    // corner there, within the tolerance of either's own.
+    let level = (hand.far.a - hand.near.a).abs() < 1e-5;
+    let within = if level { 1.5e-7 } else { 1e-9 * BALL };
+    let hand = hand
+        .ends()
+        .map(|[x, y, z]| far * x + near * y + Vec3::Z * z);
+    for (k, h) in hand.iter().enumerate() {
+        let off = ends
+            .iter()
+            .map(|p| p.dist(*h))
+            .fold(f64::INFINITY, f64::min);
+        assert!(off <= within, "the crease's end {k} is {off} off");
+    }
+    if round {
+        for f in [fi, fj] {
+            let s = &b.face(f).surface;
+            let uv = s.project(hand[1]);
+            assert!(s.normal(uv.x, uv.y).cross(hand[1]).norm() <= 1e-9 * BALL);
+        }
+    }
+}
+
+/// The post of `size` on the ball at `centre` with the foot of each wall of `walls` blended at
+/// `blend`, each blend stopping as `stops` gives for it, and each two of `crossing`, by their
+/// places in `walls`, crossing past the corner between them: every fillet face held to the
+/// hand-worked torus, every crease to its hand-worked ends, and the solid to the hand-worked
+/// volume and area. A crossing corner's volume is worked two ways, which must agree.
+fn assert_foot(
+    (centre, size): (Vec2, Vec2),
+    blend: Size,
+    walls: &[usize],
+    stops: &[[Stop; 2]],
+    crossing: &[[usize; 2]],
+) -> Brep {
+    let body = post_on_ball(centre, size);
+    let pairs: Vec<(&str, &str)> = walls.iter().map(|&w| (WALLS[w].0, "ball.skin")).collect();
+    let b = match blend {
+        Size::Round(r) => fillet(&body, &pairs, r, "foot"),
+        Size::Bevel(d) => chamfer(&body, &pairs, d, "foot"),
+    }
+    .unwrap();
+    let foot = |k: usize| {
+        let a = wall_place(centre, size, walls[k]).0;
+        let stops = stops[k];
+        (
+            WALLS[walls[k]].1,
+            Foot {
+                a,
+                size: blend,
+                stops,
+            },
+        )
+    };
+    let (mut volume, mut area) = post_on_ball_measures(centre, size);
+    for k in 0..walls.len() {
+        let (n, f) = foot(k);
+        let crossed: Vec<(Vec3, Foot)> = crossing
+            .iter()
+            .filter(|pair| pair.contains(&k))
+            .map(|pair| foot(pair[0] + pair[1] - k))
+            .collect();
+        if let Size::Round(_) = blend {
+            assert_rolls(&b, &format!("foot.round_{k}"), n, &f, &crossed);
+        }
+        volume += f.volume();
+        area += f.area();
+    }
+    for &[i, j] in crossing {
+        let [(i, (ni, fi)), (j, (nj, fj))] = if foot(i).1.a > foot(j).1.a {
+            [(i, foot(i)), (j, foot(j))]
+        } else {
+            [(j, foot(j)), (i, foot(i))]
+        };
+        let hand = Crossing {
+            far: &fi,
+            near: &fj,
+        };
+        let (columns, flux) = (hand.volume_by_columns(), hand.volume_by_flux());
+        assert!(
+            (columns - flux).abs() <= 1e-9 * columns,
+            "the corner by columns {columns} and by flux {flux}"
+        );
+        volume += columns;
+        area += hand.area();
+        assert_crease(&b, (i, ni), (j, nj), &hand);
+    }
+    assert_solid(&b, volume, area);
+    assert_eq!(b.face_count(), 6 + walls.len());
+    let surface = match blend {
+        Size::Round(_) => "torus",
+        Size::Bevel(_) => "cone",
+    };
+    assert_eq!(kinds(&b, surface), walls.len());
+    assert_eq!(kinds(&b, "sphere"), 1);
+    b
+}
+
+const FILLET: Size = Size::Round(5.92);
+const MITRED: [Stop; 2] = [Stop::Mitre(-1.0), Stop::Mitre(1.0)];
+
+const SQUARE: (Vec2, Vec2) = (Vec2::ZERO, POST);
+
+/// The stops of a blend on wall `w` of the post that ends on the planes of both walls beside it.
+fn free(centre: Vec2, size: Vec2, w: usize) -> [Stop; 2] {
+    let (_, middle, half) = wall_place(centre, size, w);
+    [Stop::Wall(middle - half), Stop::Wall(middle + half)]
+}
+
+/// The same where the walls beside it are blended too, and it crosses their blends.
+fn under(centre: Vec2, size: Vec2, w: usize) -> [Stop; 2] {
+    let (_, middle, half) = wall_place(centre, size, w);
+    [Stop::Under(middle - half), Stop::Under(middle + half)]
+}
+
+#[test]
+fn a_square_post_on_a_ball_takes_fillets_mitred_at_its_corners() {
+    // Each corner's two walls are mirror images in a plane through the ball's centre, so the two
+    // tori cross on that plane and nothing else closes the corner.
+    let b = assert_foot(SQUARE, FILLET, &[0, 1, 2, 3], &[MITRED; 4], &[]);
+    assert_eq!(kinds(&b, "plane"), 5);
+    for k in 0..4 {
+        assert_eq!(names(&b, &format!("foot.round_{k}")), 1);
+    }
+}
+
+#[test]
+fn a_foot_round_the_seam_of_the_ball_parts_is_built_as_one_face() {
+    // The ball's seam meets the foot of the wall `u_max` at its middle, y = 0, and parts that
+    // edge in two. The round along both is one face of the solid as it is sewn: one edge along
+    // the wall, where nothing else ends, and two along the ball, which meet where the seam now
+    // ends, on the round's section through the seam.
+    for (c, s) in [SQUARE, (Vec2::new(5.0, 3.0), POST)] {
+        let pairs: Vec<(&str, &str)> = WALLS.iter().map(|w| (w.0, "ball.skin")).collect();
+        let b = fillet(&post_on_ball(c, s), &pairs, 5.92, "foot").unwrap();
+        let round = b
+            .face_ids()
+            .find(|&f| {
+                b.face(f)
+                    .names
+                    .iter()
+                    .any(|x| x.to_string() == "foot.round_1")
+            })
+            .unwrap();
+        let wall = wall_place(c, s, 1).0;
+        let (mut on_wall, mut on_ball, mut seam_ends) = (0, 0, 0);
+        for &lp in &b.face(round).loops {
+            for &co in &b.lp(lp).coedges {
+                let edge = b.edge(b.coedge(co).edge);
+                let curve = edge.curve.as_ref().unwrap();
+                let points: Vec<Vec3> = (0..=4)
+                    .map(|k| {
+                        curve.eval(edge.range.0 + (edge.range.1 - edge.range.0) * k as f64 / 4.0)
+                    })
+                    .collect();
+                if points.iter().all(|q| (q.x - wall).abs() <= 1e-9) {
+                    on_wall += 1;
+                } else if points.iter().all(|q| (q.norm() - BALL).abs() <= 1e-9) {
+                    on_ball += 1;
+                    let ends = [edge.start, edge.end].map(|v| b.vertex(v).point);
+                    seam_ends += ends.iter().filter(|q| q.y.abs() <= 1e-9).count();
+                }
+            }
+        }
+        assert_eq!((on_wall, on_ball, seam_ends), (1, 2, 2));
+    }
+}
+
+#[test]
+fn a_square_post_on_a_ball_takes_chamfers_mitred_at_its_corners() {
+    let b = assert_foot(SQUARE, Size::Bevel(3.0), &[0, 1, 2, 3], &[MITRED; 4], &[]);
+    for k in 0..4 {
+        assert_eq!(names(&b, &format!("foot.bevel_{k}")), 1);
+    }
+}
+
+#[test]
+fn a_foot_fillet_on_a_ball_ends_on_the_walls_beside_it() {
+    let (c, s) = SQUARE;
+    assert_foot(SQUARE, FILLET, &[1], &[free(c, s, 1)], &[]);
+    assert_foot(
+        SQUARE,
+        FILLET,
+        &[1, 3],
+        &[free(c, s, 1), free(c, s, 3)],
+        &[],
+    );
+    // Off the ball's centre the two ends differ.
+    let c = Vec2::new(5.0, 3.0);
+    assert_foot((c, s), FILLET, &[1], &[free(c, s, 1)], &[]);
+    assert_foot((c, s), FILLET, &[0], &[free(c, s, 0)], &[]);
+}
+
+#[test]
+fn foot_fillets_on_a_ball_mitre_where_they_meet_and_end_on_a_wall_where_they_do_not() {
+    let (c, s) = SQUARE;
+    let ([lo, _], [_, hi]) = (free(c, s, 0), free(c, s, 2));
+    let two = [
+        [lo, Stop::Mitre(1.0)],
+        [Stop::Mitre(-1.0), free(c, s, 1)[1]],
+    ];
+    assert_foot(SQUARE, FILLET, &[0, 1], &two, &[]);
+    let three = [[lo, Stop::Mitre(1.0)], MITRED, [Stop::Mitre(-1.0), hi]];
+    assert_foot(SQUARE, FILLET, &[0, 1, 2], &three, &[]);
+}
+
+#[test]
+fn foot_fillets_mitre_at_the_corners_whose_mirror_plane_holds_the_centre_of_the_ball() {
+    // Moved along its diagonal, the post keeps the plane x = y through the ball's centre as the
+    // mirror of the corners between `u_max` and `v_max` and between `u_min` and `v_min`; no plane
+    // mirrors the other two, where the blends cross.
+    let (c, s) = (Vec2::new(4.0, 4.0), POST);
+    let at = |w: usize, k: usize| under(c, s, w)[k];
+    let stops = [
+        [Stop::Mitre(-1.0), at(0, 1)],
+        [at(1, 0), Stop::Mitre(1.0)],
+        [Stop::Mitre(-1.0), at(2, 1)],
+        [at(3, 0), Stop::Mitre(1.0)],
+    ];
+    assert_foot((c, s), FILLET, &[0, 1, 2, 3], &stops, &[[0, 1], [2, 3]]);
+    let ([lo, _], [_, hi]) = (free(c, s, 1), free(c, s, 2));
+    let two = [[lo, Stop::Mitre(1.0)], [Stop::Mitre(-1.0), hi]];
+    assert_foot((c, s), FILLET, &[1, 2], &two, &[]);
+}
+
+#[test]
+fn foot_blends_of_a_post_off_the_centre_of_a_ball_cross_past_its_corners() {
+    // Off the ball's centre no plane mirrors a corner's two blends: their surfaces differ, and
+    // reach the post's edge at different heights. Each blend ends on the plane of the wall beside
+    // it, and past the corner the lower of the two bounds the solid, up to the curve they cross
+    // on.
+    let (c, s) = (Vec2::new(5.0, 3.0), POST);
+    let all = [0, 1, 2, 3].map(|w| under(c, s, w));
+    let round = [[0, 1], [1, 2], [2, 3], [3, 0]];
+    let two = [
+        [free(c, s, 0)[0], under(c, s, 0)[1]],
+        [under(c, s, 1)[0], free(c, s, 1)[1]],
+    ];
+    assert_foot((c, s), FILLET, &[0, 1], &two, &round[..1]);
+    for size in [
+        Size::Round(0.5),
+        FILLET,
+        Size::Round(12.0),
+        Size::Bevel(3.0),
+    ] {
+        assert_foot((c, s), size, &[0, 1, 2, 3], &all, &round);
+    }
+}
+
+#[test]
+fn foot_fillets_a_hair_off_the_centre_of_a_ball_build_on_both_sides_of_one_level() {
+    // A post ε off the ball's centre brings two foot rounds of 5.92 to its edge 0.147·ε apart.
+    // Within 1.5e-7 of each other they share one corner on the edge; farther apart the higher
+    // round has an end of its own between the two. Either way the solid is the one worked by
+    // hand, the corner of two rounds that cross.
+    let round = [[0, 1], [1, 2], [2, 3], [3, 0]];
+    for offset in [5e-7, 6.9e-7, 9e-7, 1.1e-6, 2e-6, 1e-5] {
+        let (c, s) = (Vec2::new(offset, 0.0), POST);
+        let all = [0, 1, 2, 3].map(|w| under(c, s, w));
+        assert_foot((c, s), FILLET, &[0, 1, 2, 3], &all, &round);
+    }
+}
+
+#[test]
+fn chamfers_so_wide_that_their_feet_on_a_ball_pass_each_other_are_refused_by_name() {
+    // Far off the ball's centre and 12 wide, the chamfers of two walls reach the ball on the
+    // planes x = 34.3 and y = −27.3, which meet outside it: their contacts on the ball never
+    // cross, and the corner has no far end.
+    let (c, s, wide) = (Vec2::new(12.0, -3.0), POST, Size::Bevel(12.0));
+    let reach = |w: usize| {
+        let foot = Foot {
+            a: wall_place(c, s, w).0,
+            size: wide,
+            stops: free(c, s, w),
+        };
+        foot.section(1.0)[1]
+    };
+    assert!(reach(0).hypot(reach(1)) > BALL);
+    let pairs: Vec<(&str, &str)> = WALLS.iter().map(|w| (w.0, "ball.skin")).collect();
+    let Err(Error::Unsupported(why)) = chamfer(&post_on_ball(c, s), &pairs, 12.0, "foot") else {
+        panic!("chamfers whose feet pass each other");
+    };
+    assert!(
+        why.starts_with("chamfers that cross past the corner at"),
+        "{why}"
+    );
+    assert!(why.ends_with("pass without meeting"), "{why}");
+}
+
+#[test]
+fn foot_fillets_of_a_post_longer_than_it_is_wide_cross_past_its_corners() {
+    // In the middle of the ball, but no square: the long walls stand nearer the centre than the
+    // short ones, and no plane through a corner mirrors one onto the other.
+    let (c, s) = (Vec2::ZERO, Vec2::new(20.0, 34.0));
+    let all = [0, 1, 2, 3].map(|w| under(c, s, w));
+    let round = [[0, 1], [1, 2], [2, 3], [3, 0]];
+    assert_foot((c, s), Size::Round(4.0), &[0, 1, 2, 3], &all, &round);
+    assert_foot((c, s), Size::Bevel(2.5), &[0, 1, 2, 3], &all, &round);
+}
+
+#[test]
+fn foot_blends_that_reach_over_the_pole_of_a_ball_take_it_and_its_seam_with_them() {
+    // A post 8 by 30 at (5, 3): its wall `u_min` stands at x = 1, past the ball's centre from
+    // its own side, and the ball's seam runs from that wall's foot 1 mm on to the pole. A round
+    // of 0.5 stops short of the pole, at x = 0.49; one of 2 touches the ball at x = −0.95, and
+    // the larger ones farther out, so the pole and that stretch of the seam lie under the blend.
+    let (c, s) = (Vec2::new(5.0, 3.0), Vec2::new(8.0, 30.0));
+    let reach = |r: f64| (1.0 - r) * BALL / (BALL + r);
+    assert!(reach(0.5) > 0.0 && reach(2.0) < 0.0);
+    let all = [0, 1, 2, 3].map(|w| under(c, s, w));
+    let round = [[0, 1], [1, 2], [2, 3], [3, 0]];
+    for size in [
+        Size::Round(0.5),
+        Size::Round(2.0),
+        FILLET,
+        Size::Round(12.0),
+        Size::Bevel(2.0),
+        Size::Bevel(5.92),
+    ] {
+        assert_foot((c, s), size, &[0, 1, 2, 3], &all, &round);
+    }
+    // The wall alone, ending on the walls beside it, and with one neighbour.
+    assert_foot((c, s), FILLET, &[3], &[free(c, s, 3)], &[]);
+    let two = [
+        [free(c, s, 3)[0], under(c, s, 3)[1]],
+        [under(c, s, 0)[0], free(c, s, 0)[1]],
+    ];
+    assert_foot((c, s), FILLET, &[3, 0], &two, &[[0, 1]]);
+    // The same post turned a quarter turn, its short wall beside the pole.
+    let (c, s) = (Vec2::new(16.0, 1.0), Vec2::new(30.0, 8.0));
+    let all = [0, 1, 2, 3].map(|w| under(c, s, w));
+    assert_foot((c, s), FILLET, &[0, 1, 2, 3], &all, &round);
+}
+
+#[test]
+fn a_foot_blend_that_reaches_over_a_seam_its_edge_does_not_meet_is_refused_by_name() {
+    // The post 8 by 30 at (5, 16) stands 1 mm beside the ball's seam, which runs along its wall
+    // `v_min` and meets none of its edges. A round of 2 at that wall's foot touches the ball at
+    // y = −0.95, past the seam: its end on the plane of `u_min` crosses the seam at (1, 0), and
+    // the round of `u_max` beside it crosses it again. Sewn as they are, the ball's face would
+    // have the seam running through the hole the rounds leave in it.
+    let (c, s) = (Vec2::new(5.0, 16.0), Vec2::new(8.0, 30.0));
+    for walls in [&[0usize, 1][..], &[0, 1, 2, 3]] {
+        let pairs: Vec<(&str, &str)> = walls.iter().map(|&w| (WALLS[w].0, "ball.skin")).collect();
+        let Err(Error::Unsupported(why)) = fillet(&post_on_ball(c, s), &pairs, 2.0, "foot") else {
+            panic!("rounds over a seam");
+        };
+        assert!(
+            why.contains("crosses another edge of that face at ("),
+            "{why}"
+        );
+        assert!(why.contains(", 0.000, "), "{why}");
+    }
+}
+
+#[test]
+fn a_foot_round_whose_contact_passes_through_the_pole_of_its_ball_is_built() {
+    // The post 8 by 30 at (−6, −2) has its wall `u_max` at x = −2, and a round of 2 there
+    // touches the ball on the plane x = 0, a meridian through the pole: the contact meets the
+    // seam's end at the pole, where a face may touch itself, and crosses nothing.
+    let (c, s) = (Vec2::new(-6.0, -2.0), Vec2::new(8.0, 30.0));
+    let all = [0, 1, 2, 3].map(|w| under(c, s, w));
+    let round = [[0, 1], [1, 2], [2, 3], [3, 0]];
+    assert_foot((c, s), Size::Round(2.0), &[0, 1, 2, 3], &all, &round);
+}
+
+#[test]
+fn rim_rounds_whose_crease_leaves_no_room_between_its_ends_are_built_or_refused() {
+    // A hole 28.5 square at (−6, −2) through the ball, its rim rounded at 5.92: at one corner a
+    // line across the lower round's strip leaves the box between the crease's two ends at the
+    // very point it enters it, within rounding, and there is no stretch of it to look along.
+    let ball = sphere(&at_z(0.0), BALL, "ball").unwrap();
+    let foot = Profile::rect(Vec2::new(-6.0, -2.0), POST.x, POST.y);
+    let post = extrude(&foot, &at_z(0.0), TOP, "post").unwrap();
+    let body = difference(&ball, &post).unwrap();
+    let pairs: Vec<(&str, &str)> = WALLS.iter().map(|w| (w.0, "ball.skin")).collect();
+    match fillet(&body, &pairs, 5.92, "rim") {
+        Ok(b) => assert!(check::check(&b).is_empty()),
+        Err(Error::Unsupported(why)) => {
+            assert!(
+                why.starts_with("fillets that cross past the corner at"),
+                "{why}"
+            )
+        }
+        Err(other) => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn fillets_at_the_foot_of_a_leaning_wall_and_an_upright_one_cross_past_their_corner() {
+    // A post on a plate, 20 square at its foot, whose wall `lean` leans in by 0.1 for each 1 up
+    // while its other walls stand upright, with the feet of `lean` and of the upright wall
+    // `start` beside it rounded at 3. The upright wall's round is a quarter circle; the leaning
+    // wall's ball touches the plate `t` from the foot, where t = r·(1 − sin β)/cos β for the lean
+    // β, and the wall r·(1 − sin β) up. No plane mirrors one round onto the other.
+    let (r, slope, side, height) = (3.0, 0.1f64, 20.0, 30.0);
+    let plate = extrude(
+        &Profile::rect(Vec2::ZERO, 60.0, 60.0),
+        &at_z(0.0),
+        10.0,
+        "plate",
+    )
+    .unwrap();
+    let outline = [
+        Vec2::new(-10.0, 10.0),
+        Vec2::new(10.0, 10.0),
+        Vec2::new(10.0 - slope * height, 10.0 + height),
+        Vec2::new(-10.0, 10.0 + height),
+    ];
+    let upright = Frame::new(Vec3::new(0.0, 10.0, 0.0), -Vec3::Y, Vec3::X).unwrap();
+    let post = extrude(
+        &Profile::polygon(&outline, &["foot", "lean", "top", "left"]),
+        &upright,
+        side,
+        "post",
+    )
+    .unwrap();
+    let body = union(&plate, &post).unwrap();
+    let pairs = [("post.lean", "plate.end"), ("post.start", "plate.end")];
+    let b = fillet(&body, &pairs, r, "f").unwrap();
+
+    let lean = slope.atan();
+    let slant = (1.0 + slope * slope).sqrt();
+    let t = r * (1.0 - lean.sin()) / lean.cos();
+    let top = FRAC_PI_2 - lean;
+    // The leaning round's section: the kite of the two tangents less the ball's sector. It runs
+    // the whole wall, ending square on the upright wall `end`.
+    let kite = r * t - 0.5 * r * r * top;
+    // The upright round's section, a square less a quarter disc, and its first moment in z: it
+    // ends on the leaning wall's plane, which takes z·tan β off its length at the height z.
+    let quarter = r * r * (1.0 - PI / 4.0);
+    let moment = r.powi(3) * (5.0 / 6.0 - PI / 4.0);
+    // Past the corner the two rounds cross. The leaning round's section is run by the angle φ its
+    // ball has turned from the plate's contact: r·(1 − cos φ) high and as wide as from the wall's
+    // plane to the arc. The upright round stands that high r·(1 − sin φ) from its wall.
+    let width = |phi: f64| t - r * phi.sin() + r * (1.0 - phi.cos()) * slope;
+    let reach = |phi: f64| r * (1.0 - phi.sin());
+    // The corner's volume by slices square to the upright wall: the leaning section below the
+    // height the upright round stands at there.
+    let below = |turned: f64| gauss(0.0, turned.min(top), |phi| width(phi) * r * phi.sin());
+    let across = |a: f64, b: f64| gauss(a, b, |psi| below(psi) * r * psi.cos());
+    let by_walls = across(0.0, top) + across(top, FRAC_PI_2);
+    // And by level slices: at each height the leaning section's width by the upright's reach.
+    let by_levels = gauss(0.0, top, |phi| width(phi) * reach(phi) * r * phi.sin());
+    assert!((by_walls - by_levels).abs() <= 1e-12 * by_walls);
+    let post_volume = 0.5 * (side + side - slope * height) * height * side;
+    let volume = 36000.0 + post_volume + kite * side + quarter * side - slope * moment + by_walls;
+
+    let plain = 2.0 * 3600.0 + 4.0 * 600.0 - side * side
+        + (side - slope * height) * side
+        + side * height
+        + (side + side - slope * height) * height
+        + side * height * slant;
+    // Each round's face and flat end, less the strips of the plate and the wall it covers.
+    let leaning = top * r * side - 2.0 * t * side + kite;
+    let standing = r * (side * FRAC_PI_2 - slope * r * (FRAC_PI_2 - 1.0))
+        - r * side
+        - (side * r - 0.5 * slope * r * r)
+        + quarter;
+    // The corner: each round's patch up to the crease, less the plate beneath, and the step of
+    // the upright round's end left on the leaning wall's plane above the leaning round.
+    let step = gauss(top, FRAC_PI_2, |psi| {
+        r * (top.cos() - psi.cos()) * r * psi.cos()
+    }) * slant;
+    let corner = gauss(0.0, top, |phi| width(phi) * r) + gauss(0.0, top, |phi| reach(phi) * r)
+        - r * t
+        + step;
+    assert_solid(&b, volume, plain + leaning + standing + corner);
+    assert_eq!(kinds(&b, "cylinder"), 2);
+    assert_eq!(names(&b, "f.round_0"), 1);
+    assert_eq!(names(&b, "f.round_1"), 1);
 }

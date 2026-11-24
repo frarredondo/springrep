@@ -934,9 +934,13 @@ the branches pass each other, as far apart as the chord the margin leaves (6e-4 
 same reason two cylinders are one radius whose axes cross (the closed form with two ellipses) only
 while the radii's and the axes' gaps sum to `LINEAR`: the ellipses, about the axes' midpoint at the
 mean radius, then lie within half `LINEAR` of each. The points come from the closed form and are
-fitted with points added at middle parameters until the spline lies within half `LINEAR` of both
-surfaces and of the closed form itself (`IntersectionCurve::fit_sampled`), so nothing is refined
-numerically and no step can lose a touching point. Within the tolerance of both surfaces is not
+fitted with points added until, a quarter, a half and three quarters along every span, the spline
+lies within half `LINEAR` of both surfaces and of the closed form itself
+(`IntersectionCurve::fit_sampled_seeded`), so nothing is refined numerically and no step can lose a
+touching point. A span that strays is parted in two, four or eight by how far it strays, a
+cubic's error falling as the fourth power of its spans, and every span is tried again on the
+spline returned; a span's three points are the ones it is parted at, so no point of the closed
+form is worked out twice. Within the tolerance of both surfaces is not
 enough where they cross at a shallow angle: a fillet's tube against a copy's corner ball 1e-3 mm off
 its axis crosses it at 1e-4 rad, and a spline 5.8e-5 mm along that band from the loop still lay
 within `LINEAR` of both, so the vertices placed on the exact loop fell off it and the loop was
@@ -1126,14 +1130,65 @@ was run over, every sewn blend agrees to 3e-16, except the two whose ends are tr
 edge, where both ways intersect a cone or cylinder with a traced curve: 1.8e-12 in area and 5.3e-12
 in volume (a notch's chamfer) and 4.9e-11 and 1.4e-10 (the notch's round).
 
-Each piece ends where its edge does, in one of nine ways:
+Each piece ends where its edge does, in one of ten ways:
 
 - **On a neighbour's section.** Pieces whose edges continue each other tangentially share their end
   section exactly. They are glued into one tool along it without a boolean: the two blend surfaces
   touch tangentially there, which intersection cannot resolve.
-- **On a mitre.** Two straight pieces on one plane whose other faces are planes mirrored across the
-  plane between them (a box's top edges, a pocket's corners) each run past the corner and are cut on
-  that mirror plane, where their blend faces meet.
+- **On a mitre.** Two pieces on one face whose other faces are planes mirrored across the plane
+  between them, where that mirror also takes the shared face onto itself: a plane square to it (a
+  box's top edges, a pocket's corners), or a sphere centred on it (a square post standing on the
+  middle of a ball). The mirror then takes one blend surface onto the other, so they cross on the
+  mirror plane, and each piece runs past the corner and is cut there. Two rounds between a plane
+  and a sphere are tori about different axes, and their crease is the mirror plane's cut of
+  either.
+- **Crossing at a corner** ([`blend/strip.rs`](../src/blend/strip.rs)). Two pieces, both convex
+  or both concave, sharing one face at a vertex of three faces, across a sharp edge between two
+  plane walls that no plane mirrors (a post off the middle of a ball, or longer than it is wide; a
+  post on a plate with one wall leaning more than the next; a square hole's rim; a bar's end). The
+  two blend surfaces cross on a curve of their own, the crease, and both its ends are known
+  outright. The far end is where the two contact curves on the shared face meet: both surfaces
+  touch that face there, and so each other. At the near end one piece, the lower, comes to the
+  edge between the walls nearer the corner. Where that edge bends the other way from the blends
+  (the post, the hole), its contact curve runs on past the edge over its own wall's plane until
+  it meets the other piece's surface; where the edge bends the same way (the bar), the higher
+  piece has taken the edge that far and the lower's contact stops short of it, on the higher's
+  surface. The crease starts at that point, and the higher piece ends on the lower's wall plane
+  from the edge to it. Between its ends the crease is held on both surfaces, through points each
+  solved on a line across the lower piece's strip laid flat, within the box the two ends are
+  corners of: the two surfaces cross a second time through the far end, where they touch, and
+  that second curve lies outside the box. Two rounds that come to the edge within 1.5e-7 of each
+  other share one corner there, the point between the two, which lies on both surfaces since
+  each is tangent to its wall; other blends do so only within the tolerance. On a post 5 by 3
+  off the middle of a ball, rounded at 0.5 to 12, the solid holds the volume and area worked by
+  hand to 8e-12, each corner's volume being worked two ways that agree to 1e-10.
+
+Where every piece ends square on its own section, on one plane (another face's, or a mitre's
+mirror) or at such a corner, no tool is made and nothing is cut: each piece's section is swept a
+little past both ends, and its blend face is rebuilt alone, each contact curve stopped where the
+end's curve meets it and the end's curves put in place of the sweep's own
+([`blend/strip.rs`](../src/blend/strip.rs)). A plane's cut of a cylinder or a plane is the conic;
+of a torus or a cone it is held on both surfaces as a crease is. These faces are sewn as the
+tools' are. Two pieces whose edges are stretches of one line or circle parted at a vertex, as
+a wall's foot is where the ball's seam meets it, are swept as one strip: its contact with the
+wall is one edge, and its contact with the ball is parted where the seam ends on it, so no two
+faces are left to merge. The strips' own sweeps are not checked, since only their blend faces
+are kept and the sewn solid is checked whole. A square post's four mitred foot rounds on a plate
+take 0.23 ms this way against 3.8 cut, and on a ball 3.1 ms against 26. About 1.3 ms of the
+ball's is the fit of its four creases, each a plane's cut of a torus, which no closed form
+gives; 1.5 ms is the sewn solid's check, which settles which way the solid faces by its volume
+and searches each two faces that meet at a corner for a crossing, where a plate's faces are
+settled by a ray: no closed form gives where two tori cross, so the ray's proof is not to be
+had.
+
+An edge of the body that leaves the joint between two pieces along their end section there, and
+stops short of the contact curve, lies wholly under the blend: a ball's seam from the foot of a
+wall to the pole, where the blend reaches over the pole. It goes with the blend, and so does the
+pole. A point just past a pole lies half a turn of longitude from one just short of it, so no
+hint places the contact curves' parameters there: each rebuilt loop's projected coedges are
+continued one from the next round the loop instead. A blend's edge on a face that would cross
+another edge of that face away from a vertex the two share, as a contact reaching over a seam
+its own edge does not meet, is refused: the face's boundary would cross itself.
 - **Through into air.** Two convex pieces sharing one face, at a vertex of three faces where each
   edge runs on past the vertex through the other's wall into air (a tower's rim where a square side
   meets a leaning cut), each run past the vertex and clear of that wall. Cutting both leaves the
@@ -1277,9 +1332,14 @@ What the region form cannot reach comes back as `Error::Unsupported`, never as a
   than a run of its end face's edges; and a fillet larger than a convex corner round in its chain
   (the exact path reaches past the corner's axis);
 - blends meeting at a vertex other than as a tangent chain, a mirrored mitre, a convex corner they
-  run through, a sphere corner, a ridge or a flat corner (the error names the vertex and the
-  faces), and an edge ending where several other faces meet it other than at a convex corner of
-  planes, or where a face other than a plane, cylinder or cone meets it;
+  run through, a corner they cross at, a sphere corner, a ridge or a flat corner (the error names
+  the vertex and the faces), and an edge ending where several other faces meet it other than at a
+  convex corner of planes, or where a face other than a plane, cylinder or cone meets it;
+- blends that cross at a corner whose faces cannot be sewn (the error names the corner and why):
+  beside a piece that must be cut; blends so wide that their contacts on the shared face pass
+  without meeting, so the crease has no far end; where a blend reaches over an edge of the face
+  it stands on that its own edge does not meet, as a ball's seam beside a post (the error names
+  the point); and the largest rounds of a hole's rim;
 - a blend wider than a face it sits on, including one whose strip would cross onto the next face
   along its edge, such as where its edge runs on, tangent, as a curve other than a line or circle.
 
@@ -2165,7 +2225,10 @@ solid never pinches.
 parameter domain becomes a boundary integral by Green's theorem; the inner integral runs along a
 parameter in which the integrand is a low-order polynomial or trigonometric polynomial (so a fixed
 Gauss rule is exact to rounding; on a B-spline surface the held parameter's basis is summed into one
-iso-line per boundary point), and the boundary integral is adaptive. Its tolerance halves with each
+iso-line per boundary point), and the boundary integral is adaptive. Along a plane and round the
+axis of a cylinder, cone, sphere or torus the inner integral is taken in closed form: each of
+the four is a circle turned about its axis, so the point and `su × sv` are trigonometric
+polynomials of degree one in the angle. Its tolerance halves with each
 halving of a piece, so where the two rules differ by noise in the integrand rather than by their
 error (the inner rule's own error, near 1e-8 of `|su × sv|` on a fitted sheet, jumps each time the
 boundary point crosses a knot), they miss it by about as many times at every depth; once a halving
