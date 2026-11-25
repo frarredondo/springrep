@@ -16,6 +16,7 @@ use crate::{
     math::{Frame, Point3, Vec2, Vec3},
     measure::{bbox, in_face, uv_polygons},
     rays::Rays,
+    tol,
     topo::{Brep, FaceId},
 };
 
@@ -247,11 +248,42 @@ fn smooth(b: &Brep, f: FaceId, g: FaceId, p: Point3) -> bool {
     n.cross(m).norm() <= 1e-7 && n.dot(m) > 0.0
 }
 
+fn grazing_angles(view: Vec3, half_angle: f64) -> Option<[f64; 2]> {
+    // In the surface frame, n(u)·view vanishes where x cos(u) + y sin(u) = axial.
+    let (sin, cos) = half_angle.sin_cos();
+    let (x, y, axial) = (view.x * cos, view.y * cos, view.z * sin);
+    let amplitude = x.hypot(y);
+    if amplitude <= axial.abs() + tol::ANGULAR {
+        return None;
+    }
+    let phase = y.atan2(x);
+    let spread = (axial / amplitude).acos();
+    Some([phase - spread, phase + spread])
+}
+
 /// The curves on face `f`'s surface where the line of sight along `d` grazes it, each over a
 /// parameter range that covers the face: generators of a cylinder or cone, the great circle of a
 /// ball. Other surfaces have none drawn.
 fn outlines(b: &Brep, f: FaceId, d: Vec3) -> Vec<(Curve, f64, f64)> {
     let s = &b.face(f).surface;
+    let angles = match s {
+        Surface::Cylinder(c) => grazing_angles(c.frame.dir_to_local(d), 0.0),
+        Surface::Cone(c) => grazing_angles(c.frame.dir_to_local(d), c.half_angle),
+        Surface::Sphere(sp) => {
+            let Ok(frame) = Frame::new(sp.frame.origin, d, d.any_perpendicular()) else {
+                return Vec::new();
+            };
+            let circle = Circle {
+                frame,
+                radius: sp.radius,
+            };
+            return vec![(Curve::Circle(circle), 0.0, TAU)];
+        }
+        _ => return Vec::new(),
+    };
+    let Some(angles) = angles else {
+        return Vec::new();
+    };
     let polys = uv_polygons(b, f);
     let (vlo, vhi) = polys
         .iter()
@@ -259,46 +291,13 @@ fn outlines(b: &Brep, f: FaceId, d: Vec3) -> Vec<(Curve, f64, f64)> {
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), q| {
             (lo.min(q.y), hi.max(q.y))
         });
-    let mut out = Vec::new();
-    match s {
-        Surface::Cylinder(_) | Surface::Cone(_) => {
-            // The normal is the same all along a generator: the grazing ones are the roots in u
-            // of n(u)·d, which 720 samples bracket and bisection pins.
-            let v = 0.5 * (vlo + vhi);
-            let g = |u: f64| s.normal(u, v).dot(d);
-            let n = 720;
-            for i in 0..n {
-                let (mut a, mut z) = (TAU * i as f64 / n as f64, TAU * (i + 1) as f64 / n as f64);
-                if g(a) == 0.0 || g(a).signum() == g(z).signum() {
-                    continue;
-                }
-                for _ in 0..80 {
-                    let m = 0.5 * (a + z);
-                    if g(m).signum() == g(a).signum() {
-                        a = m;
-                    } else {
-                        z = m;
-                    }
-                }
-                let u = 0.5 * (a + z);
-                let p = s.eval(u, vlo);
-                if let Some((line, len)) = Line::through(p, s.eval(u, vhi)) {
-                    out.push((Curve::Line(line), 0.0, len));
-                }
-            }
-        }
-        Surface::Sphere(sp) => {
-            if let Ok(frame) = Frame::new(sp.frame.origin, d, d.any_perpendicular()) {
-                let circle = Circle {
-                    frame,
-                    radius: sp.radius,
-                };
-                out.push((Curve::Circle(circle), 0.0, TAU));
-            }
-        }
-        _ => {}
-    }
-    out
+    angles
+        .into_iter()
+        .filter_map(|u| {
+            let (line, len) = Line::through(s.eval(u, vlo), s.eval(u, vhi))?;
+            Some((Curve::Line(line), 0.0, len))
+        })
+        .collect()
 }
 
 /// Where chords `ab` and `cd` cross, as fractions along each, if they do.
@@ -412,7 +411,7 @@ fn sample(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{primitive, tol};
+    use crate::primitive;
 
     fn lateral_face(body: &Brep) -> FaceId {
         body.face_ids()
