@@ -557,12 +557,17 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
                         continue;
                     }
                 }
+                let mut copy = b.clone();
+                if let Err(e) = pl.at.place_scaled_body(&mut copy) {
+                    rejected.push(format!("#{}: {e}", pl.solid));
+                    continue;
+                }
                 if let Some(h) = heal {
                     healed.push(Healing {
                         index,
                         step_id: pl.solid,
                         moved: h.moved,
-                        at: pl.at.rigid.point(h.at),
+                        at: pl.at.place_scaled_point(h.at),
                         what: h.what.clone(),
                         surfaces: h.surfaces,
                     });
@@ -584,8 +589,6 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
                 let first = out.face_count();
                 let solid_index = index;
                 index += 1;
-                let mut copy = b.clone();
-                copy.transform(&pl.at.rigid);
                 let mut own_colours = Vec::new();
                 let faces = copy.face_ids().collect::<Vec<_>>();
                 for (k, (f, (step, name))) in faces.into_iter().zip(names).enumerate() {
@@ -615,7 +618,7 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
                         index: solid_index,
                         step_id: pl.solid,
                         faces: (ids[x.a.index()], ids[x.b.index()]),
-                        at: pl.at.rigid.point(x.at),
+                        at: pl.at.place_scaled_point(x.at),
                         depth: x.depth,
                     });
                 }
