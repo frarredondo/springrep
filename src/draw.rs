@@ -408,3 +408,89 @@ fn sample(
     sample(at, t0, m, tolerance, depth + 1, out);
     sample(at, m, t1, tolerance, depth + 1, out);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{primitive, tol};
+
+    fn lateral_face(body: &Brep) -> FaceId {
+        body.face_ids()
+            .find(|&f| {
+                matches!(
+                    body.face(f).surface,
+                    Surface::Cylinder(_) | Surface::Cone(_)
+                )
+            })
+            .unwrap()
+    }
+
+    fn lateral_outlines(body: &Brep, direction: Vec3) -> Vec<(Curve, f64, f64)> {
+        outlines(body, lateral_face(body), direction)
+    }
+
+    fn assert_generators(outlines: &[(Curve, f64, f64)], angles: [f64; 2], bottom: f64, top: f64) {
+        assert_eq!(outlines.len(), angles.len(), "{outlines:?}");
+        for angle in angles {
+            let radial = Frame::WORLD.radial(angle);
+            let foot = radial * bottom;
+            let tip = radial * top + Vec3::Z * 2.0;
+            assert!(
+                outlines.iter().any(|(curve, lo, hi)| {
+                    let (a, b) = (curve.eval(*lo), curve.eval(*hi));
+                    (a.dist(foot) <= tol::LINEAR && b.dist(tip) <= tol::LINEAR)
+                        || (b.dist(foot) <= tol::LINEAR && a.dist(tip) <= tol::LINEAR)
+                }),
+                "missing generator at {angle}: {outlines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cylinder_draws_a_generator_at_an_interior_sample() {
+        let body = primitive::cylinder(&Frame::WORLD, 5.0, 2.0, "post").unwrap();
+        let angle = TAU * 120.0 / 720.0;
+        let direction = Frame::WORLD.radial(angle).cross(Vec3::Z);
+        assert_generators(
+            &lateral_outlines(&body, direction),
+            [angle, angle + TAU / 2.0],
+            5.0,
+            5.0,
+        );
+    }
+
+    #[test]
+    fn a_cone_draws_both_generators_at_adjacent_samples() {
+        let body = primitive::cone(&Frame::WORLD, 2.0, 4.0, 2.0, "cone").unwrap();
+        let step = TAU / 720.0;
+        // Along this view the slope-one cone grazes at 0 and at step.
+        let direction = Vec3::new(1.0, (step / 2.0).tan(), 1.0).unit().unwrap();
+        assert_generators(&lateral_outlines(&body, direction), [0.0, step], 2.0, 4.0);
+    }
+
+    #[test]
+    fn an_oblique_view_of_a_cone_draws_its_two_grazing_generators() {
+        let body = primitive::cone(&Frame::WORLD, 2.0, 4.0, 2.0, "cone").unwrap();
+        let angle = TAU / 6.0;
+        assert_generators(
+            &lateral_outlines(&body, Vec3::new(1.0, 0.0, 0.5).unit().unwrap()),
+            [-angle, angle],
+            2.0,
+            4.0,
+        );
+    }
+
+    #[test]
+    fn a_view_along_a_cone_generator_draws_no_lateral_outline() {
+        let body = primitive::cone(&Frame::WORLD, 2.0, 4.0, 2.0, "cone").unwrap();
+        let direction = body.face(lateral_face(&body)).surface.d1(0.0, 0.0).2;
+        assert!(lateral_outlines(&body, direction).is_empty());
+    }
+
+    #[test]
+    fn an_axial_view_of_a_tilted_cylinder_draws_no_generators() {
+        let frame = Frame::new(Vec3::ZERO, Vec3::new(1.0, 2.0, 3.0), Vec3::X).unwrap();
+        let body = primitive::cylinder(&frame, 5.0, 2.0, "post").unwrap();
+        assert!(lateral_outlines(&body, frame.z).is_empty());
+    }
+}
