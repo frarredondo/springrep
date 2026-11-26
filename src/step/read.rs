@@ -414,6 +414,11 @@ impl<'a> Assembly<'a> {
                 Error::InvalidInput(format!("STEP #{map_id}: expected a representation map"))
             })?;
         let src = geo.reference(map_id, map.get(1))?;
+        if representation(self.file, src).is_none() {
+            return Err(Error::InvalidInput(format!(
+                "STEP #{map_id}: expected a mapped representation at #{src}"
+            )));
+        }
         geo.use_context(context)?;
         let origin = geo.transform_of(geo.reference(map_id, map.first())?)?;
         let target = geo.transform_of(geo.reference(item, p.get(2))?)?;
