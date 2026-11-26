@@ -198,3 +198,63 @@ fn only_a_valid_sheet_is_thickened() {
         ));
     }
 }
+
+#[test]
+fn a_spherical_sheet_with_a_pole_crossing_keeps_its_area_when_flipped() {
+    use std::f64::consts::{FRAC_PI_2, TAU};
+
+    use crate::{
+        geom::{Circle, Sphere},
+        tol,
+        topo::{CoedgeSpec, PCurve},
+    };
+
+    let radius = 3.0;
+    let mut sheet = Brep::new();
+    let positive_y = sheet.add_vertex(Vec3::Y * radius);
+    let negative_y = sheet.add_vertex(-Vec3::Y * radius);
+    let equator = sheet.add_edge(
+        Curve::Circle(Circle {
+            frame: Frame::WORLD,
+            radius,
+        }),
+        (FRAC_PI_2, 3.0 * FRAC_PI_2),
+        positive_y,
+        negative_y,
+    );
+    let meridian = sheet.add_edge(
+        Curve::Circle(Circle {
+            frame: Frame::new(Vec3::ZERO, -Vec3::X, -Vec3::Y).unwrap(),
+            radius,
+        }),
+        (0.0, PI),
+        negative_y,
+        positive_y,
+    );
+    let face = sheet.add_face(
+        Surface::Sphere(Sphere {
+            frame: Frame::WORLD,
+            radius,
+        }),
+        false,
+        [],
+    );
+    sheet.add_loop(
+        face,
+        [(equator, FRAC_PI_2), (meridian, 3.0 * FRAC_PI_2)]
+            .into_iter()
+            .map(|(edge, u)| CoedgeSpec {
+                edge,
+                reversed: false,
+                pcurve: PCurve::Projected {
+                    seed: Vec2::new(u, 0.0),
+                },
+            })
+            .collect(),
+    );
+    sheet.add_shell(vec![face]);
+
+    let turned = flipped(&sheet).unwrap();
+    let area = PI * radius * radius;
+    assert!((measure::area(&turned) - area).abs() <= TAU * radius * tol::LINEAR);
+}

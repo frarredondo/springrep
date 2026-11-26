@@ -63,3 +63,20 @@ fn a_point_held_off_the_seam_meshes_through_the_point() {
     let text = include_bytes!("fixtures/vertex-loop-off-seam.step");
     reads_and_meshes(text, "vertex-loop-off-seam", -5.0);
 }
+
+#[test]
+fn an_imported_cylindrical_sheet_keeps_its_area_when_turned_over() {
+    use springrep::{geom::Surface, sheet, tol};
+
+    let text = include_bytes!("fixtures/vertex-loop-off-seam.step");
+    let body = step::read(text, "cylinder").unwrap().brep;
+    let side = body
+        .face_ids()
+        .find(|&face| matches!(body.face(face).surface, Surface::Cylinder(_)))
+        .unwrap();
+    let side = sheet::from_faces(&body, &[side]).unwrap();
+    let flipped = sheet::flipped(&side).unwrap();
+    let (radius, height) = (5.0, 10.0);
+    let area = 2.0 * PI * radius * height;
+    assert!((measure::area(&flipped) - area).abs() <= 2.0 * PI * (radius + height) * tol::LINEAR);
+}
