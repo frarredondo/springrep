@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::{
     check,
     error::{Error, Result, invalid},
-    topo::{Brep, CoedgeSpec, EdgeId, FaceId, VertexId},
+    topo::{Brep, CoedgeSpec, EdgeId, FaceId, PCurve, VertexId},
 };
 
 /// A sheet of copies of `faces` of `s`, each keeping its surface, its outward normal and its names:
@@ -72,10 +72,19 @@ fn copied(s: &Brep, faces: &[FaceId], flip: bool) -> Result<Brep> {
                         e
                     }
                 };
+                let mut pcurve = co.pcurve.clone();
+                if flip && let PCurve::Projected { seed } = &mut pcurve {
+                    let (lo, hi) = s.edge(co.edge).range;
+                    let (start, end) = if co.reversed { (hi, lo) } else { (lo, hi) };
+                    // A meridian can cross a pole even when it has no angular travel.
+                    let ts: [f64; 33] =
+                        std::array::from_fn(|k| start + (end - start) * k as f64 / 32.0);
+                    *seed = s.coedge_uvs(c, &ts)[32];
+                }
                 specs.push(CoedgeSpec {
                     edge,
                     reversed: co.reversed != flip,
-                    pcurve: co.pcurve.clone(),
+                    pcurve,
                 });
             }
             if flip {
