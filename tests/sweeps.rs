@@ -453,3 +453,23 @@ fn bad_dimensions_are_invalid_input() {
         assert!(matches!(r, Err(Error::InvalidInput(_))), "{r:?}");
     }
 }
+
+#[test]
+fn a_twisted_disc_that_misses_its_fit_is_a_numerical_error() {
+    use springrep::{
+        geom::{Circle, Curve},
+        sweep::along_curve,
+    };
+    use std::f64::consts::{FRAC_PI_2, TAU};
+
+    let radius = 10.0;
+    let path = Curve::Circle(Circle {
+        frame: Frame::WORLD,
+        radius,
+    });
+    let sketch = Frame::new(Vec3::X * radius, Vec3::Y, Vec3::X).unwrap();
+    let disc = Profile::circle(Vec2::ZERO, 1.0);
+    let r = along_curve(&disc, &sketch, &path, (0.0, FRAC_PI_2), 128.0 * TAU, "bend");
+    let volume = r.as_ref().map(measure::volume);
+    assert!(matches!(r, Err(Error::Numerical(_))), "{volume:?}");
+}
