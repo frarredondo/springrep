@@ -1515,6 +1515,27 @@ fn scaled_transformations_place_scaled_copies() {
     );
 }
 
+#[test]
+fn a_mapped_solid_with_coplanar_axes_is_reported_as_rejected() {
+    let part = block("b", [0.0, 0.0, 0.0], [1.0, 2.0, 3.0]);
+    let text = mapped_part(
+        &part,
+        9020,
+        "#9016=MAPPED_ITEM('',#9096,#9018);
+         #9018=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',#9023,#9023,#9031,1.,#9022);
+",
+    );
+    let imp = read(text.as_bytes(), "imp").unwrap();
+    assert_eq!(imp.bodies.len(), 1);
+    assert_eq!(imp.rejected.len(), 1, "{:?}", imp.rejected);
+    let why = &imp.rejected[0];
+    assert!(why.starts_with("#9016:"), "{why}");
+    assert!(
+        why.contains("STEP #9018: a transformation's axes are coplanar"),
+        "{why}"
+    );
+}
+
 fn block_with_off_centre_bore() -> Brep {
     let plate = Profile::rect(Vec2::new(0.5, 1.0), 1.0, 2.0);
     let bore = Profile::circle(Vec2::new(0.25, 0.5), 0.25);
