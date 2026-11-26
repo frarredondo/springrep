@@ -4,7 +4,8 @@
 //! Visibility along a curve changes only where, seen from the viewer, it passes behind another
 //! edge or outline, or meets one. So every stroke (an edge between faces that meet at an angle,
 //! or an outline where the line of sight grazes a curved face, trimmed to the face) is cut where
-//! its projection crosses another's, found by Newton's method from the crossing chords, and where
+//! its projection crosses another's, directly for a circle and a line or two circles in parallel planes,
+//! and by Newton's method from the crossing chords. It is also cut where
 //! another stroke ends on it. Each piece between cuts is then seen or hidden throughout, and the
 //! exact ray caster decides which at its middle, far from where the line of sight grazes anything.
 
@@ -77,6 +78,12 @@ pub fn hidden_lines(b: &Brep, direction: Vec3, tolerance: f64) -> Result<Drawing
         for j in 0..strokes.len() {
             if i == j {
                 continue;
+            }
+            let (a, b) = (&strokes[i], &strokes[j]);
+            if let Some(crossings) = circle_line_crossings(a, b, &view)
+                .or_else(|| parallel_circle_crossings(a, b, &view))
+            {
+                cuts[i].extend(crossings);
             }
             for (k, w) in flats[i].windows(2).enumerate() {
                 for (l, x) in flats[j].windows(2).enumerate() {
@@ -298,6 +305,89 @@ fn outlines(b: &Brep, f: FaceId, d: Vec3) -> Vec<(Curve, f64, f64)> {
             Some((Curve::Line(line), 0.0, len))
         })
         .collect()
+}
+
+/// The parameters on a circle where its projection crosses a line segment's.
+fn circle_line_crossings(circle: &Stroke, line: &Stroke, view: &Frame) -> Option<Vec<f64>> {
+    let (Curve::Circle(c), Curve::Line(line_curve)) = (&circle.curve, &line.curve) else {
+        return None;
+    };
+    let flat = |v: Vec3| Vec2::new(v.dot(view.x), v.dot(view.y));
+    let dir = flat(line_curve.dir);
+    let speed = dir.norm();
+    if speed * (line.t1 - line.t0).abs() <= tol::LINEAR {
+        return Some(Vec::new());
+    }
+    let along = dir / speed;
+    let origin = flat(c.frame.origin - line.curve.eval(line.t0));
+    let x = flat(c.frame.x * c.radius);
+    let y = flat(c.frame.y * c.radius);
+    // Signed distance to the line is origin × along + a cos(t) + b sin(t).
+    let (a, b) = (x.cross(along), y.cross(along));
+    let (distance, amplitude) = (along.cross(origin), a.hypot(b));
+    if amplitude - distance.abs() <= tol::LINEAR {
+        return Some(Vec::new());
+    }
+    let phase = b.atan2(a);
+    let spread = (distance / amplitude).acos();
+    let (line_lo, line_hi) = (line.t0.min(line.t1), line.t0.max(line.t1));
+    let crossings = [phase - spread, phase + spread]
+        .into_iter()
+        .filter_map(|angle| {
+            let t = circle_parameter(circle, angle)?;
+            let point = origin + x * t.cos() + y * t.sin();
+            let u = line.t0 + point.dot(along) / speed;
+            (u >= line_lo - tol::param(speed) && u <= line_hi + tol::param(speed)).then_some(t)
+        })
+        .collect();
+    Some(crossings)
+}
+
+fn circle_parameter(stroke: &Stroke, angle: f64) -> Option<f64> {
+    let (lo, hi) = (stroke.t0.min(stroke.t1), stroke.t0.max(stroke.t1));
+    let t = lo + (angle - lo).rem_euclid(TAU);
+    (t <= hi).then_some(t)
+}
+
+/// The projected crossings of circles in parallel planes seen from off those planes.
+fn parallel_circle_crossings(a: &Stroke, b: &Stroke, view: &Frame) -> Option<Vec<f64>> {
+    let (Curve::Circle(first), Curve::Circle(second)) = (&a.curve, &b.curve) else {
+        return None;
+    };
+    let normal = first.frame.z;
+    let incidence = normal.dot(view.z);
+    if incidence.abs() <= tol::ANGULAR
+        || normal.cross(second.frame.z).norm() * second.radius > tol::LINEAR * incidence.abs()
+    {
+        return None;
+    }
+    // Looking along the view direction puts both circles in the same plane without distorting either.
+    let between = second.frame.origin - first.frame.origin;
+    let centres = between - view.z * (between.dot(normal) / incidence);
+    let (r1, r2) = (first.radius, second.radius);
+    let distance = centres.norm();
+    if r1 + r2 - distance <= tol::LINEAR || distance - (r1 - r2).abs() <= tol::LINEAR {
+        return Some(Vec::new());
+    }
+    // Subtract the two circle equations to find the common chord's distance along the centre line.
+    let along = (distance + (r1 - r2) * (r1 + r2) / distance) * 0.5;
+    let height = ((r1 - along) * (r1 + along)).max(0.0).sqrt();
+    let dir = centres / distance;
+    let middle = dir * along;
+    let half_chord = normal.cross(dir) * height;
+    let parameter = |s: &Stroke, circle: &Circle, offset: Vec3| {
+        let angle = offset.dot(circle.frame.y).atan2(offset.dot(circle.frame.x));
+        circle_parameter(s, angle)
+    };
+    Some(
+        [middle - half_chord, middle + half_chord]
+            .into_iter()
+            .filter_map(|point| {
+                parameter(b, second, point - centres)?;
+                parameter(a, first, point)
+            })
+            .collect(),
+    )
 }
 
 /// Where chords `ab` and `cd` cross, as fractions along each, if they do.

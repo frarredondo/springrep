@@ -34,3 +34,79 @@ fn a_side_view_shows_both_generators_of_a_cylinder() {
         }));
     }
 }
+
+#[test]
+fn a_thin_foreground_block_hides_a_short_arc_of_a_rim() {
+    use std::f64::consts::PI;
+
+    let radius = 100.0;
+    let half_width = 2.0;
+    let mut scene = cylinder(&Frame::WORLD, radius, 1.0, "rim").unwrap();
+    let radial = Frame::WORLD.radial(PI / 64.0);
+    let tangent = Vec3::Z.cross(radial);
+    let origin = radial * (radius - 0.06) - tangent * half_width + Vec3::Z * 4.0;
+    let frame = Frame::new(origin, Vec3::Z, radial).unwrap();
+    let foreground =
+        springrep::primitive::block(&frame, Vec3::new(0.16, 2.0 * half_width, 1.0), "bar").unwrap();
+    scene.append(&foreground);
+
+    let drawing = hidden_lines(&scene, -Vec3::Z, 0.5).unwrap();
+    let hidden: Vec<_> = drawing
+        .hidden
+        .iter()
+        .filter(|line| (line[0].z - 1.0).abs() <= tol::LINEAR)
+        .collect();
+    assert_eq!(hidden.len(), 1, "{hidden:?}");
+    let line = hidden[0];
+    let along_radial = (radius * radius - half_width * half_width).sqrt();
+    for side in [-1.0, 1.0] {
+        let crossing = radial * along_radial + tangent * (side * half_width) + Vec3::Z;
+        assert!(
+            [line[0], *line.last().unwrap()]
+                .into_iter()
+                .any(|p| p.dist(crossing) <= tol::LINEAR),
+            "{line:?} should end at {crossing:?}"
+        );
+    }
+}
+
+#[test]
+fn a_foreground_pin_hides_an_arc_between_two_rims_seen_obliquely() {
+    use std::f64::consts::PI;
+
+    let radius = 100.0;
+    let pin_radius = 0.8;
+    let centre_distance = radius + pin_radius - 0.08;
+    let radial = Frame::WORLD.radial(PI / 64.0);
+    let tangent = Vec3::Z.cross(radial);
+    let viewer = Vec3::Z - radial * 0.25;
+    let mut scene = cylinder(&Frame::WORLD, radius, 1.0, "rim").unwrap();
+    let frame = Frame::new(
+        radial * centre_distance + Vec3::Z + viewer * 3.0,
+        Vec3::Z,
+        Vec3::X,
+    )
+    .unwrap();
+    scene.append(&cylinder(&frame, pin_radius, 1.0, "pin").unwrap());
+
+    let drawing = hidden_lines(&scene, -viewer, 0.5).unwrap();
+    let hidden: Vec<_> = drawing
+        .hidden
+        .iter()
+        .filter(|line| line.iter().all(|p| (p.z - 1.0).abs() <= tol::LINEAR))
+        .collect();
+    assert_eq!(hidden.len(), 1, "{hidden:?}");
+    let x = (radius * radius + centre_distance * centre_distance - pin_radius * pin_radius)
+        / (2.0 * centre_distance);
+    let y = (radius * radius - x * x).sqrt();
+    let line = hidden[0];
+    for side in [-1.0, 1.0] {
+        let crossing = radial * x + tangent * (side * y) + Vec3::Z;
+        assert!(
+            [line[0], *line.last().unwrap()]
+                .into_iter()
+                .any(|p| p.dist(crossing) <= tol::LINEAR),
+            "{line:?} should end at {crossing:?}"
+        );
+    }
+}
