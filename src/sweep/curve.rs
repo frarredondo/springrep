@@ -253,8 +253,13 @@ pub fn along_curve(
                     .fold(0.0, f64::max)
             })
             .fold(0.0, f64::max);
-        if worst <= FIT || n >= 512 {
+        if worst <= FIT {
             break (us, frames, across);
+        }
+        if n >= 512 {
+            return Err(Error::Numerical(format!(
+                "path sweep misses its profile by {worst:e} mm at the fit limit"
+            )));
         }
         per *= 2;
     };
