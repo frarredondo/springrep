@@ -454,6 +454,8 @@ impl<'a> Assembly<'a> {
         let child_is_r1 = match (child_reps.contains(&r1), child_reps.contains(&r2)) {
             (true, false) => true,
             (false, true) => false,
+            // Nothing to check against: rep_1 is the related definition's shape (ISO 10303-41, 23.4.4).
+            _ if child_reps.is_empty() => true,
             _ => {
                 return Err(Error::InvalidInput(format!(
                     "STEP #{rel}: representations #{r1} and #{r2} do not identify product #{child}"
