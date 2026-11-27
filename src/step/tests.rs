@@ -5932,3 +5932,302 @@ fn a_torus_bound_turned_in_a_void_read_as_a_solid_of_its_own_is_reported_at_that
         );
     }
 }
+
+/// The rounded block with its round grown by `dr`, in a file that states `stated` as its
+/// uncertainty, or states none.
+fn rounds_grown(dr: f64, stated: Option<f64>) -> super::Import {
+    let text = with_rounds_grown(&rounded_block(), dr);
+    let text = match stated {
+        Some(u) => with_uncertainty(&text, u),
+        None => text,
+    };
+    read(text.as_bytes(), "imp").unwrap()
+}
+
+/// Grown by `dr`, the round lies `dr` off the two sides it is tangent to along its two lines, and
+/// at each of its four corners, where an end of the block crosses it: sheets that touch, which no
+/// point or curve within the kernel tolerance of both can join once `dr` passes half of it. In a
+/// file that states an uncertainty above `dr`, they are held, and no surface moves: each of the
+/// round's lines is the curve midway between its faces, `dr/2` from each, and each corner the
+/// point midway between the sheets on the end, `dr/2` from each, its edges ending on their own
+/// faces. Each carries 1.5 times its gap, `0.75 dr`, as a kept solid's tolerances are widened;
+/// for `dr = 1e-7` that is within the kernel tolerance, and the solid is exact. Every face lies
+/// within `dr` of the block's, so the volume is within `A dr` of the block's,
+/// `V₀ = 3 (60 − (1 − π/4))`, `A` its area.
+#[test]
+fn touching_faces_within_the_files_uncertainty_are_held_rather_than_moved() {
+    let b = rounded_block();
+    let (v0, a) = (measure::volume(&b), measure::area(&b));
+    assert!((v0 - 3.0 * (60.0 - (1.0 - PI / 4.0))).abs() < 1e-9);
+    for (dr, stated) in [
+        (1e-7, 1e-6),
+        (3e-7, 1e-6),
+        (5e-7, 1e-6),
+        (2e-6, 1e-5),
+        (5e-6, 1e-5),
+    ] {
+        let imp = rounds_grown(dr, Some(stated));
+        assert!(imp.rejected.is_empty(), "{dr}: {:?}", imp.rejected);
+        assert!(check::check(&imp.brep).is_empty(), "{dr}");
+        assert_eq!(imp.healed.len(), 1, "{dr}");
+        let h = &imp.healed[0];
+        assert!(h.surfaces == 0.0 && h.moved <= 1.001 * dr, "{dr}: {h:?}");
+        if 0.75 * dr <= crate::tol::LINEAR {
+            assert!(imp.tolerant.is_empty(), "{dr}: {:?}", imp.tolerant);
+        } else {
+            let t = &imp.tolerant[0];
+            assert_eq!(
+                (t.vertices, t.edges, t.past_stated),
+                (4, 2, 0),
+                "{dr}: {t:?}"
+            );
+            assert!((t.largest - 0.75 * dr).abs() <= 1e-13, "{dr}: {t:?}");
+        }
+        let v = measure::volume(&imp.brep);
+        assert!((v - v0).abs() <= a * dr, "{dr}: {v} vs {v0}");
+    }
+}
+
+/// A file that states no uncertainty is healed as before: the surface step moves the round onto
+/// the sides it touches, and the solid is exact, within `A dr` of the block's volume.
+#[test]
+fn touching_faces_in_a_file_that_states_no_uncertainty_are_closed_by_moving_a_surface() {
+    let b = rounded_block();
+    let (v0, a) = (measure::volume(&b), measure::area(&b));
+    for dr in [1e-7, 3e-7, 2e-6, 5e-6] {
+        let imp = rounds_grown(dr, None);
+        assert!(imp.rejected.is_empty(), "{dr}: {:?}", imp.rejected);
+        assert!(check::check(&imp.brep).is_empty(), "{dr}");
+        assert!(imp.tolerant.is_empty(), "{dr}: {:?}", imp.tolerant);
+        let h = &imp.healed[0];
+        assert!(h.surfaces > 0.0 && h.surfaces <= dr, "{dr}: {h:?}");
+        let v = measure::volume(&imp.brep);
+        assert!((v - v0).abs() <= a * dr, "{dr}: {v} vs {v0}");
+    }
+}
+
+/// Grown 5e-6 in a file that states 1e-6, the round's corners are 2.5e-6 from the sheets they
+/// would be held between, more than the file says its geometry is off, so nothing is held, and
+/// the file's geometry is kept with tolerances of 1.5 times the 5e-6 gap, as before.
+#[test]
+fn touching_faces_further_apart_than_the_file_states_are_kept_as_it_has_them() {
+    let imp = rounds_grown(5e-6, Some(1e-6));
+    assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+    assert!(check::check(&imp.brep).is_empty());
+    let t = &imp.tolerant[0];
+    assert_eq!((t.vertices, t.edges, t.past_stated), (4, 4, 8));
+    assert!((t.largest - 7.5e-6).abs() < 1e-8, "{t:?}");
+}
+
+/// Grown by `dr` in a file that states `dr` or more, but no more than twice `dr`, the round's
+/// corners would be held `dr/2` from the sheets, within what the file states; but each arc at a
+/// corner ends on the round and the end it crosses, `dr` from the file's vertex on the side, and
+/// so would the solid's geometry move `dr`, which is not within it. Nothing is held: the surface
+/// step moves the round onto the sides, as in a file that states none, and the solid is exact.
+/// So too where the hold would be within what the file states but `dr` past what healing may
+/// move ([`MAX_HEAL`](super::MAX_HEAL), 0.05 mm): grown 0.06 or 0.066 mm in a file that states
+/// 0.2 mm.
+#[test]
+fn touching_faces_a_hold_would_move_further_than_it_may_are_closed_by_moving_a_surface() {
+    let b = rounded_block();
+    let (v0, a) = (measure::volume(&b), measure::area(&b));
+    for (dr, stated) in [(1e-6, 1e-6), (0.06, 0.2), (0.066, 0.2)] {
+        let imp = rounds_grown(dr, Some(stated));
+        assert!(imp.rejected.is_empty(), "{dr}: {:?}", imp.rejected);
+        assert!(check::check(&imp.brep).is_empty(), "{dr}");
+        assert!(imp.tolerant.is_empty(), "{dr}: {:?}", imp.tolerant);
+        let h = &imp.healed[0];
+        assert!(
+            h.surfaces > 0.0 && h.moved <= dr && h.moved <= super::MAX_HEAL,
+            "{dr}: {h:?}"
+        );
+        let v = measure::volume(&imp.brep);
+        assert!((v - v0).abs() <= a * dr, "{dr}: {v} vs {v0}");
+    }
+}
+
+/// Where healing that held some of the round's lines or corners then fails, as when the surface
+/// step it leaves would move the round more than [`MAX_HEAL`](super::MAX_HEAL), that heal is set
+/// aside and healing runs again holding nothing: the round grown 0.05 or −0.05 mm in a file that
+/// states 0.1 mm, 0.05 mm in one that states 0.05 mm, and −1e-3 mm in one that states 1e-3 mm
+/// heal as the same file stating no uncertainty does, the surface step moving the round, at most
+/// |dr|, and the solid exact with nothing kept with tolerances.
+#[test]
+fn touching_faces_a_heal_holding_them_cannot_finish_are_healed_holding_nothing() {
+    let b = rounded_block();
+    let (v0, a) = (measure::volume(&b), measure::area(&b));
+    for (dr, stated) in [(0.05, 0.1), (-0.05, 0.1), (0.05, 0.05), (-1e-3, 1e-3)] {
+        let imp = rounds_grown(dr, Some(stated));
+        let none = rounds_grown(dr, None);
+        assert!(imp.rejected.is_empty(), "{dr}: {:?}", imp.rejected);
+        assert!(check::check(&imp.brep).is_empty(), "{dr}");
+        assert!(imp.tolerant.is_empty(), "{dr}: {:?}", imp.tolerant);
+        let h = &imp.healed[0];
+        assert!(
+            h.surfaces > 0.0 && h.moved <= dr.abs() && h.moved <= super::MAX_HEAL,
+            "{dr}: {h:?}"
+        );
+        assert_eq!(
+            (h.moved, h.surfaces),
+            (none.healed[0].moved, none.healed[0].surfaces),
+            "{dr}"
+        );
+        let v = measure::volume(&imp.brep);
+        assert_eq!(v, measure::volume(&none.brep), "{dr}");
+        assert!((v - v0).abs() <= a * dr.abs(), "{dr}: {v} vs {v0}");
+    }
+}
+
+/// The loose heal, which a solid reaches only where healing exactly and keeping it as the file has
+/// it both fail, holds no more than the exact heal may: grown by `dr` in a file that states `dr`,
+/// a hold of the round's corners would move the arcs' ends `dr` from the file's vertices, which is
+/// not within it, so the loose heal holds nothing there, as the exact heal does not, and moves
+/// nothing past what the file states.
+#[test]
+fn touching_faces_a_hold_would_move_too_far_are_not_held_loosely_either() {
+    for dr in [1e-6, 1e-3, 0.05] {
+        super::topology::LOOSE_PROBE.set(Some(Vec::new()));
+        let imp = rounds_grown(dr, Some(dr));
+        let probe = super::topology::LOOSE_PROBE.take().unwrap();
+        assert!(imp.rejected.is_empty(), "{dr}: {:?}", imp.rejected);
+        assert_eq!(probe.len(), 1, "{dr}");
+        if let Some(h) = &probe[0] {
+            assert!(h.moved <= dr, "{dr}: {h:?}");
+        }
+    }
+}
+
+/// A wedge of angle `alpha` along the z axis, H = 2 high and L = 10 long, in a file that states
+/// `stated` as its uncertainty: the planes y = 0 and y = x tan α meet the bottom z = 0, the top
+/// z = H and the end x = L. The edge where they meet is written as the line through `(dx, dy)`
+/// parallel to the axis, off both planes, its vertices on the axis.
+fn wedge(alpha: f64, (dx, dy): (f64, f64), stated: f64) -> String {
+    let (l, h) = (10.0f64, 2.0f64);
+    let q = l * alpha.tan();
+    let (s, c) = (alpha.sin(), alpha.cos());
+    step_file(&format!(
+        "#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(0.,0.,{h:?}));
+#3=CARTESIAN_POINT('',({l:?},0.,0.));
+#4=CARTESIAN_POINT('',({l:?},0.,{h:?}));
+#5=CARTESIAN_POINT('',({l:?},{q:?},0.));
+#6=CARTESIAN_POINT('',({l:?},{q:?},{h:?}));
+#7=CARTESIAN_POINT('',({dx:?},{dy:?},0.));
+#11=VERTEX_POINT('',#1);
+#12=VERTEX_POINT('',#2);
+#13=VERTEX_POINT('',#3);
+#14=VERTEX_POINT('',#4);
+#15=VERTEX_POINT('',#5);
+#16=VERTEX_POINT('',#6);
+#20=DIRECTION('',(1.,0.,0.));
+#21=DIRECTION('',({c:?},{s:?},0.));
+#22=DIRECTION('',(0.,1.,0.));
+#23=DIRECTION('',(0.,0.,1.));
+#24=DIRECTION('',(0.,0.,-1.));
+#25=DIRECTION('',(0.,-1.,0.));
+#26=DIRECTION('',({ns:?},{c:?},0.));
+#30=VECTOR('',#20,1.);
+#31=VECTOR('',#21,1.);
+#32=VECTOR('',#22,1.);
+#33=VECTOR('',#23,1.);
+#40=LINE('',#1,#30);
+#41=LINE('',#2,#30);
+#42=LINE('',#1,#31);
+#43=LINE('',#2,#31);
+#44=LINE('',#3,#32);
+#45=LINE('',#4,#32);
+#46=LINE('',#7,#33);
+#47=LINE('',#3,#33);
+#48=LINE('',#5,#33);
+#50=EDGE_CURVE('',#11,#13,#40,.T.);
+#51=EDGE_CURVE('',#12,#14,#41,.T.);
+#52=EDGE_CURVE('',#11,#15,#42,.T.);
+#53=EDGE_CURVE('',#12,#16,#43,.T.);
+#54=EDGE_CURVE('',#13,#15,#44,.T.);
+#55=EDGE_CURVE('',#14,#16,#45,.T.);
+#56=EDGE_CURVE('',#11,#12,#46,.T.);
+#57=EDGE_CURVE('',#13,#14,#47,.T.);
+#58=EDGE_CURVE('',#15,#16,#48,.T.);
+#60=AXIS2_PLACEMENT_3D('',#1,#24,#20);
+#61=AXIS2_PLACEMENT_3D('',#2,#23,#20);
+#62=AXIS2_PLACEMENT_3D('',#1,#25,#20);
+#63=AXIS2_PLACEMENT_3D('',#1,#26,#21);
+#64=AXIS2_PLACEMENT_3D('',#3,#20,#22);
+#70=PLANE('',#60);
+#71=PLANE('',#61);
+#72=PLANE('',#62);
+#73=PLANE('',#63);
+#74=PLANE('',#64);
+#80=ORIENTED_EDGE('',*,*,#52,.T.);
+#81=ORIENTED_EDGE('',*,*,#54,.F.);
+#82=ORIENTED_EDGE('',*,*,#50,.F.);
+#83=EDGE_LOOP('',(#80,#81,#82));
+#84=FACE_OUTER_BOUND('',#83,.T.);
+#85=ADVANCED_FACE('',(#84),#70,.T.);
+#90=ORIENTED_EDGE('',*,*,#51,.T.);
+#91=ORIENTED_EDGE('',*,*,#55,.T.);
+#92=ORIENTED_EDGE('',*,*,#53,.F.);
+#93=EDGE_LOOP('',(#90,#91,#92));
+#94=FACE_OUTER_BOUND('',#93,.T.);
+#95=ADVANCED_FACE('',(#94),#71,.T.);
+#100=ORIENTED_EDGE('',*,*,#50,.T.);
+#101=ORIENTED_EDGE('',*,*,#57,.T.);
+#102=ORIENTED_EDGE('',*,*,#51,.F.);
+#103=ORIENTED_EDGE('',*,*,#56,.F.);
+#104=EDGE_LOOP('',(#100,#101,#102,#103));
+#105=FACE_OUTER_BOUND('',#104,.T.);
+#106=ADVANCED_FACE('',(#105),#72,.T.);
+#110=ORIENTED_EDGE('',*,*,#56,.T.);
+#111=ORIENTED_EDGE('',*,*,#53,.T.);
+#112=ORIENTED_EDGE('',*,*,#58,.F.);
+#113=ORIENTED_EDGE('',*,*,#52,.F.);
+#114=EDGE_LOOP('',(#110,#111,#112,#113));
+#115=FACE_OUTER_BOUND('',#114,.T.);
+#116=ADVANCED_FACE('',(#115),#73,.T.);
+#120=ORIENTED_EDGE('',*,*,#54,.T.);
+#121=ORIENTED_EDGE('',*,*,#58,.T.);
+#122=ORIENTED_EDGE('',*,*,#55,.F.);
+#123=ORIENTED_EDGE('',*,*,#57,.F.);
+#124=EDGE_LOOP('',(#120,#121,#122,#123));
+#125=FACE_OUTER_BOUND('',#124,.T.);
+#126=ADVANCED_FACE('',(#125),#74,.T.);
+#130=CLOSED_SHELL('',(#85,#95,#106,#116,#126));
+#131=MANIFOLD_SOLID_BREP('',#130);
+#140=(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.));
+#141=(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.));
+#142=(NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT());
+#143=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE({stated:?}),#140,'distance_accuracy_value','');
+#144=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#143)) \
+GLOBAL_UNIT_ASSIGNED_CONTEXT((#140,#141,#142)) REPRESENTATION_CONTEXT('','3D'));
+#145=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#131),#144);",
+        ns = -s,
+    ))
+}
+
+/// Planes at 4° or 5° to each other have normals within a sine of 0.1 of each other, as faces that
+/// touch do, but they cross, along the axis: an edge written off them is refitted onto that line,
+/// as in a file that states no uncertainty, not held between them. The edge moves by the
+/// distance its line was written off the axis, √(dx² + dy²), no surface moves, and the solid is
+/// exact, with the wedge's volume H L² tan α / 2. The file states 1e-3 mm.
+#[test]
+fn faces_that_cross_at_a_shallow_angle_meet_where_they_cross_rather_than_being_held() {
+    for deg in [4.0f64, 5.0] {
+        let alpha = deg.to_radians();
+        let want = 2.0 * 100.0 * alpha.tan() / 2.0;
+        for (dx, dy) in [(-2e-6, -1e-6), (-2e-5, -1e-5)] {
+            let imp = read(wedge(alpha, (dx, dy), 1e-3).as_bytes(), "wedge").unwrap();
+            let name = format!("{deg}° ({dx}, {dy})");
+            assert!(imp.rejected.is_empty(), "{name}: {:?}", imp.rejected);
+            assert!(imp.tolerant.is_empty(), "{name}: {:?}", imp.tolerant);
+            assert!(check::check(&imp.brep).is_empty(), "{name}");
+            let h = &imp.healed[0];
+            let off = (dx * dx + dy * dy).sqrt();
+            assert!(
+                h.surfaces == 0.0 && (h.moved - off).abs() <= 1e-12,
+                "{name}: {h:?}"
+            );
+            let v = measure::volume(&imp.brep);
+            assert!((v - want).abs() <= 1e-12 * want, "{name}: {v} vs {want}");
+        }
+    }
+}

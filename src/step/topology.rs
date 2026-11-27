@@ -68,6 +68,17 @@ pub(super) struct Raw {
     pub edges: Vec<RawEdge>,
     pub faces: Vec<RawFace>,
     pub shells: Vec<Vec<usize>>,
+    /// The uncertainty the file states, where it is above the kernel's: the most a vertex whose
+    /// faces touch there may hold its edges' ends apart ([`heal`]).
+    pub stated: Option<f64>,
+    /// The tolerance healing gave each vertex whose faces touch and have no common point: its
+    /// edges end on their own faces, within it of the vertex.
+    pub held: HashMap<usize, f64>,
+    /// The same for each edge whose faces touch along it and have no curve in common.
+    pub held_edges: HashMap<usize, f64>,
+    /// How many vertices and edges healing held where their faces touch, within the kernel
+    /// tolerance or not.
+    pub holds: usize,
 }
 
 /// The parameter of the point of `c` nearest `p`; a periodic curve's within its first period.
@@ -2516,13 +2527,32 @@ fn shell_points(raw: &Raw, k: usize) -> Vec<Point3> {
     out
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Where set, each solid this thread reads is healed loosely ([`heal::heal_loosely`]) as well,
+    /// before it is read as usual, and how far that moved it is kept here, so tests can probe the
+    /// loose heal of a solid that would not reach it.
+    pub(super) static LOOSE_PROBE: std::cell::RefCell<Option<Vec<Option<heal::Healed>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// The checked solid of the shells of `raw`, as [`solid`] reads them, with its faces' STEP ids and
 /// names and how far healing moved it; `uncertainty` is the one its file states, and `ours`
 /// whether this kernel wrote the file.
 fn built(raw: Raw, uncertainty: Option<f64>, ours: bool, strict: bool) -> Result<Shells> {
     let mut file = own_nappes(join_contacts(raw))?;
     let turned = agree_senses(&mut file)?;
+    file.stated = uncertainty.filter(|&u| u > tol::LINEAR);
     let names = || file.faces.iter().map(|f| (f.id, f.name.clone())).collect();
+    #[cfg(test)]
+    LOOSE_PROBE.with_borrow_mut(|probe| {
+        if let Some(found) = probe {
+            found.push(heal::heal_loosely(
+                &mut file.clone(),
+                &mut heal::Held::default(),
+            ));
+        }
+    });
     if strict {
         if let Some(why) = heal::misfit(&file) {
             return Err(Error::InvalidInput(format!(
@@ -2534,9 +2564,11 @@ fn built(raw: Raw, uncertainty: Option<f64>, ours: bool, strict: bool) -> Result
         let (ranges, _) = heal::heal(&mut raw)?;
         return assemble(&raw, &ranges, None).map(|b| (b, names(), None, turned));
     }
-    let exact = || {
+    // What healing found where faces touch, for each time it is tried.
+    let mut memo = heal::Held::default();
+    let mut exact = || {
         let mut raw = file.clone();
-        heal::heal(&mut raw)
+        heal::heal_remembering(&mut raw, &mut memo)
             .and_then(|(ranges, healed)| assemble(&raw, &ranges, None).map(|b| (b, healed)))
     };
     let within = uncertainty.filter(|&u| u > tol::LINEAR);
@@ -2580,7 +2612,7 @@ fn built(raw: Raw, uncertainty: Option<f64>, ours: bool, strict: bool) -> Result
         Err(e) => {
             // Healed where it can be, and held by tolerances where it cannot.
             let mut loose = file.clone();
-            let healed = heal::heal_loosely(&mut loose);
+            let healed = heal::heal_loosely(&mut loose, &mut memo);
             let l = match (tolerant(&loose), healed.as_ref(), within) {
                 (Ok(_), Some(h), Some(within)) if h.moved > within => format!(
                     "healing would move {} {:.1e} mm, more than the file's {within:.1e} mm",
@@ -2638,6 +2670,12 @@ fn turned_round(raw: &Raw, turned: &[(SolidId, ShellId, bool)]) -> Raw {
 /// The arena of a solid read as `raw`, as the file orients it, unchecked.
 fn build(raw: &Raw, ranges: &[(f64, f64)], tolerated: Option<&heal::Tolerated>) -> Result<Brep> {
     let mut bld = Builder::new(raw, ranges);
+    for (&v, &x) in &raw.held {
+        bld.b.set_vertex_tolerance(bld.vertices[v], x);
+    }
+    for (&e, &x) in &raw.held_edges {
+        bld.b.set_edge_tolerance(bld.edges[e], x);
+    }
     if let Some(t) = tolerated {
         for (v, &x) in t.vertices.iter().enumerate() {
             bld.b.set_vertex_tolerance(bld.vertices[v], x);
