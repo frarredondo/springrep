@@ -172,3 +172,19 @@ fn a_relationship_to_another_parts_shape_cannot_place_the_child() {
     assert_eq!(instances, [["post-a"], ["post-b"]], "{rejected:?}");
     assert_eq!(rejected.len(), 1, "{rejected:?}");
 }
+
+#[test]
+fn a_relationship_can_place_the_child_in_rep_2() {
+    let mut text = written();
+    for entity in [
+        "=ITEM_DEFINED_TRANSFORMATION('','',",
+        "=(REPRESENTATION_RELATIONSHIP('','',",
+    ] {
+        let line = text.lines().rfind(|line| line.contains(entity)).unwrap();
+        let (start, args) = line.split_once(entity).unwrap();
+        let (pair, rest) = args.split_once(')').unwrap();
+        let (first, second) = pair.split_once(',').unwrap();
+        text = text.replacen(line, &format!("{start}{entity}{second},{first}){rest}"), 1);
+    }
+    reads_back_where_placed(&text);
+}
