@@ -1797,6 +1797,24 @@ fn a_mapped_solid_with_coplanar_axes_is_reported_as_rejected() {
     );
 }
 
+#[test]
+fn a_map_to_a_missing_representation_is_reported() {
+    let part = block("b", [0.0, 0.0, 0.0], [1.0, 2.0, 3.0]);
+    let text = mapped_part(
+        &part,
+        9020,
+        "#9016=MAPPED_ITEM('',#9097,#9018);
+         #9097=REPRESENTATION_MAP(#9020,#9900);
+         #9018=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',#9023,#9024,#9031,1.,#9022);
+",
+    );
+    let import = read(text.as_bytes(), "imp").unwrap();
+    assert!(
+        matches!(import.rejected.as_slice(), [reason] if reason.starts_with("#9016:") && reason.contains("#9900")),
+        "{:?}",
+        import.rejected
+    );
+}
 fn block_with_off_centre_bore() -> Brep {
     let plate = Profile::rect(Vec2::new(0.5, 1.0), 1.0, 2.0);
     let bore = Profile::circle(Vec2::new(0.25, 0.5), 0.25);
