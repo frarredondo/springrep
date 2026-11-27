@@ -80,9 +80,12 @@ pub fn hidden_lines(b: &Brep, direction: Vec3, tolerance: f64) -> Result<Drawing
                 continue;
             }
             let (a, b) = (&strokes[i], &strokes[j]);
-            if let Some(crossings) = circle_line_crossings(a, b, &view)
-                .or_else(|| parallel_circle_crossings(a, b, &view))
-            {
+            if let Some(crossings) = circle_line_crossings(a, b, &view) {
+                for (circle, line) in crossings {
+                    cuts[i].push(circle);
+                    cuts[j].push(line);
+                }
+            } else if let Some(crossings) = parallel_circle_crossings(a, b, &view) {
                 cuts[i].extend(crossings);
             }
             for (k, w) in flats[i].windows(2).enumerate() {
@@ -307,8 +310,8 @@ fn outlines(b: &Brep, f: FaceId, d: Vec3) -> Vec<(Curve, f64, f64)> {
         .collect()
 }
 
-/// The parameters on a circle where its projection crosses a line segment's.
-fn circle_line_crossings(circle: &Stroke, line: &Stroke, view: &Frame) -> Option<Vec<f64>> {
+/// The parameters on a circle and a line segment where their projections cross.
+fn circle_line_crossings(circle: &Stroke, line: &Stroke, view: &Frame) -> Option<Vec<(f64, f64)>> {
     let (Curve::Circle(c), Curve::Line(line_curve)) = (&circle.curve, &line.curve) else {
         return None;
     };
@@ -337,7 +340,7 @@ fn circle_line_crossings(circle: &Stroke, line: &Stroke, view: &Frame) -> Option
             let t = circle_parameter(circle, angle)?;
             let point = origin + x * t.cos() + y * t.sin();
             let u = line.t0 + point.dot(along) / speed;
-            (u >= line_lo - tol::param(speed) && u <= line_hi + tol::param(speed)).then_some(t)
+            (u >= line_lo - tol::param(speed) && u <= line_hi + tol::param(speed)).then_some((t, u))
         })
         .collect();
     Some(crossings)
