@@ -110,3 +110,33 @@ fn a_foreground_pin_hides_an_arc_between_two_rims_seen_obliquely() {
         );
     }
 }
+
+#[test]
+fn a_cylinder_rim_hides_the_inner_end_of_a_straight_edge() {
+    let radius = 100.0;
+    let half_width = 2.0;
+    let inner_radius = radius - 0.06;
+    let radial = Frame::WORLD.radial(std::f64::consts::PI / 64.0);
+    let tangent = Vec3::Z.cross(radial);
+    let origin = radial * inner_radius - tangent * half_width - Vec3::Z * 4.0;
+    let frame = Frame::new(origin, Vec3::Z, radial).unwrap();
+    let strip =
+        springrep::primitive::block(&frame, Vec3::new(0.16, 2.0 * half_width, 1.0), "strip")
+            .unwrap();
+    let mut scene = cylinder(&Frame::WORLD, radius, 1.0, "rim").unwrap();
+    scene.append(&strip);
+
+    let drawing = hidden_lines(&scene, -Vec3::Z, 0.5).unwrap();
+    let inner = origin + Vec3::Z;
+    let rim_radius = (radius * radius - half_width * half_width).sqrt();
+    let crossing = inner + radial * (rim_radius - inner_radius);
+    assert!(
+        drawing.hidden.iter().any(|line| {
+            let (a, z) = (line[0], *line.last().unwrap());
+            (a.dist(inner) <= tol::LINEAR && z.dist(crossing) <= tol::LINEAR)
+                || (z.dist(inner) <= tol::LINEAR && a.dist(crossing) <= tol::LINEAR)
+        }),
+        "expected a hidden edge from {inner:?} to {crossing:?}, got {:?}",
+        drawing.hidden
+    );
+}
