@@ -15,7 +15,7 @@ use crate::{
     Error, Result,
     boolean::classify,
     check,
-    geom::{Circle, Cone, Curve, Line, Surface},
+    geom::{Circle, Cone, Curve, Line, Surface, plane_meets},
     math::{Frame, Point3, Transform, Vec2},
     tol,
     topo::{Brep, CoedgeSpec, EdgeId, FaceId, PCurve, ShellId, SolidId, VertexId, project_on},
@@ -1159,7 +1159,6 @@ impl<'g, 'a> Reader<'g, 'a> {
         let Some((k, frame, w)) = found else {
             return Ok(false);
         };
-        let uses = &bounds[k].1;
         let pole = match surface {
             Surface::Sphere(s) => {
                 s.frame = frame;
@@ -1170,10 +1169,10 @@ impl<'g, 'a> Reader<'g, 'a> {
             Surface::Cone(c) => c.frame.origin - c.frame.z * (c.radius / c.half_angle.tan()),
             _ => return Ok(false),
         };
+        let from = self.seam_start(id, surface, pole, bounds, k)?;
         self.raw.points.push(pole);
         self.raw.vertex_ids.push(id);
         let apex = self.raw.points.len() - 1;
-        let from = use_start(&self.raw, &uses[0]);
         let seam = self.seam(id, surface, from, apex)?;
         for reversed in [false, true] {
             bounds[k].1.push(Use {
@@ -1182,6 +1181,36 @@ impl<'g, 'a> Reader<'g, 'a> {
             });
         }
         Ok(true)
+    }
+
+    /// Where on loop `k` of `bounds` a face on `surface` that closes on `pole`, a sphere's pole or
+    /// a cone's apex, has its seam begin: a vertex of the loop, or a new one where the reader
+    /// splits an edge of it at the point [`seam_point`] finds. The loop is turned to start there.
+    /// Where no seam serves, as where holes stand between the pole and the loop all round, the
+    /// face is refused.
+    fn seam_start(
+        &mut self,
+        id: u64,
+        surface: &Surface,
+        pole: Point3,
+        bounds: &mut [(bool, Vec<Use>)],
+        k: usize,
+    ) -> Result<usize> {
+        let frame = match surface {
+            Surface::Sphere(s) => s.frame,
+            Surface::Cone(c) => c.frame,
+            _ => return Ok(use_start(&self.raw, &bounds[k].1[0])),
+        };
+        let Some((e, t)) = seam_point(&self.raw, &frame, pole, bounds, k) else {
+            return bad(id, NO_SEAM);
+        };
+        let q = self.raw.edges[e].curve.eval(t);
+        let v = match vertex_at(&self.raw, &frame, pole, bounds, k, q) {
+            Some(v) => v,
+            None => self.split_edge(e, t, bounds),
+        };
+        start_at(&self.raw, &mut bounds[k].1, v);
+        Ok(v)
     }
 
     /// Splits each edge of `bounds` that passes through a pole of `surface` between its vertices,
@@ -1308,10 +1337,7 @@ impl<'g, 'a> Reader<'g, 'a> {
         match (apexes.as_slice(), bounds.len()) {
             ([], _) => {}
             (&[apex], 1) => {
-                let uses = &bounds[0].1;
-                let first = uses[0];
-                let e = &self.raw.edges[first.edge];
-                let from = if first.reversed { e.end } else { e.start };
+                let from = self.seam_start(id, &surface, self.raw.points[apex], &mut bounds, 0)?;
                 let seam = self.seam(id, &surface, from, apex)?;
                 bounds[0].1.push(Use {
                     edge: seam,
@@ -1899,18 +1925,256 @@ fn closed_both_ways(s: &Surface) -> bool {
     matches!(s, Surface::Sphere(_)) || (s.u_period().is_some() && s.v_period().is_some())
 }
 
+/// Why a cap is refused where no seam from its pole clears its other loops.
+const NO_SEAM: &str =
+    "no seam from the pole of a face reaches the loop round it clear of its other loops";
+
+/// Where on loop `k` of `bounds` a face that closes on `pole`, a sphere's pole or a cone's apex on
+/// `frame`'s axis, can have its seam begin, as an edge and its parameter. The seam, a meridian of
+/// the sphere or a generator of the cone, lies in a half-plane bounded by the axis, and it starts
+/// where that half-plane first meets a loop of the face going out from the pole, a point of loop
+/// `k` ([`first_met`]), so it meets no loop of the face, holes included, anywhere else. Of such
+/// half-planes, the first that serves: one through the loop's first vertex, where the point it
+/// first meets is that vertex, an end of an edge at it, as the vertex's curves have it
+/// ([`from_vertex`]); the one through the loop's point nearest the pole; else, of 64 evenly spaced
+/// about the axis, the middle one of the longest run that serve. `None` where none serves. The
+/// vertex is told by the edge it ends, not by its distance from the point: a file's vertex may lie
+/// off its curves by as much as healing moves it ([`heal::MAX_HEAL`]), and the seam then starts at
+/// it as on a vertex on them.
+fn seam_point(
+    raw: &Raw,
+    frame: &Frame,
+    pole: Point3,
+    bounds: &[(bool, Vec<Use>)],
+    k: usize,
+) -> Option<(usize, f64)> {
+    let first = use_start(raw, &bounds[k].1[0]);
+    let angle = about(frame);
+    let p = raw.points[first];
+    let met = |at: f64| first_met(raw, frame, pole, bounds, k, at);
+    let at_first = from_vertex(raw, frame, pole, bounds, k, first);
+    let found = at_first.or_else(|| {
+        // The loop's point nearest the pole, over each edge's whole range.
+        let mut nearest: Option<(f64, Point3)> = None;
+        for u in &bounds[k].1 {
+            let e = &raw.edges[u.edge];
+            let (ps, pe) = (raw.points[e.start], raw.points[e.end]);
+            let Some((t0, t1)) = edge_range(&e.curve, ps, pe, e.start == e.end) else {
+                continue;
+            };
+            let q = e.curve.eval(e.curve.project(pole, t0, t1));
+            if nearest.is_none_or(|n| q.dist(pole) < n.0) {
+                nearest = Some((q.dist(pole), q));
+            }
+        }
+        nearest.and_then(|(_, q)| met(angle(q)))
+    });
+    found.or_else(|| {
+        let n = 64;
+        let ats: Vec<f64> = (0..n)
+            .map(|j| angle(p) + std::f64::consts::TAU * j as f64 / n as f64)
+            .collect();
+        let serves: Vec<Option<(usize, f64)>> = ats.iter().map(|&at| met(at)).collect();
+        // The longest run of half-planes that serve, round the axis, and its middle.
+        let mut best: Option<(usize, usize)> = None;
+        for j in 0..n {
+            let starts = serves[j].is_some() && serves[(j + n - 1) % n].is_none();
+            if !starts {
+                continue;
+            }
+            let len = (0..n)
+                .take_while(|&i| serves[(j + i) % n].is_some())
+                .count();
+            if best.is_none_or(|b| len > b.1) {
+                best = Some((j, len));
+            }
+        }
+        match best {
+            Some((j, len)) => serves[(j + len / 2) % n],
+            // Every one serves, or none does.
+            None => serves[0],
+        }
+    })
+}
+
+/// Where the half-plane bounded by `frame`'s axis at angle `at` about it first meets a loop of
+/// `bounds` going out from `pole`, a sphere's pole or a cone's apex on that axis, as an edge and
+/// its parameter: `None` unless that is a point of loop `k`, with every other loop's meetings
+/// farther out by more than the tolerance. The half-plane meets the surface in a meridian of the
+/// sphere or a generator of the cone from the pole, along which the distance from the pole grows:
+/// 2R sin(θ/2) at the angle θ from the pole on a sphere of radius R, and along a straight line from
+/// the apex on a cone. So the stretch of it from the pole to the point found meets no loop but
+/// there. The meetings are exact: each edge with the plane through the axis, in closed form for a
+/// line or a conic, and for a spline by its control values' hull and Bernstein subdivision
+/// ([`crate::geom::plane_meets`]), and each edge's ends, where an edge lying in the plane, a
+/// straight generator, comes nearest the apex. `None` too where an edge's span between its
+/// vertices cannot be found.
+fn first_met(
+    raw: &Raw,
+    frame: &Frame,
+    pole: Point3,
+    bounds: &[(bool, Vec<Use>)],
+    k: usize,
+    at: f64,
+) -> Option<(usize, f64)> {
+    let h = frame.x * at.cos() + frame.y * at.sin();
+    let plane = (frame.origin, frame.z.cross(h));
+    let mut own: Option<(f64, usize, f64)> = None;
+    let mut other = f64::INFINITY;
+    for (b, (_, uses)) in bounds.iter().enumerate() {
+        for u in uses {
+            let e = &raw.edges[u.edge];
+            let (ps, pe) = (raw.points[e.start], raw.points[e.end]);
+            let (t0, t1) = edge_range(&e.curve, ps, pe, e.start == e.end)?;
+            let mut ts = plane_meets(&e.curve, (t0, t1), plane, tol::LINEAR);
+            ts.extend([t0, t1]);
+            for t in ts {
+                let q = e.curve.eval(t);
+                let off = plane.1.dot(q - plane.0).abs() > tol::LINEAR;
+                if off || h.dot(q - frame.origin) < -tol::LINEAR {
+                    continue;
+                }
+                let d = q.dist(pole);
+                if b != k {
+                    other = other.min(d);
+                } else if own.is_none_or(|o| d < o.0) {
+                    own = Some((d, u.edge, t));
+                }
+            }
+        }
+    }
+    let (d, e, t) = own?;
+    (other > d + tol::LINEAR).then_some((e, t))
+}
+
+/// Where the seam can start at vertex `v` of loop `k` of `bounds`, as an edge and its parameter: in
+/// the half-plane through an end at `v` of an edge of the loop, as the edge's curve has it, where
+/// that half-plane first meets a loop of the face at that end ([`first_met`], [`ends_at`]). `None`
+/// where no edge's end at `v` serves. The half-plane is taken through the curve's end, not through
+/// the vertex's point: a vertex off its curves lies off the half-plane through their end when the
+/// loop's centre is off the axis, as on a cap cut by a tilted plane, by up to the distance it lies
+/// off them, and the half-plane through its point then meets the curve elsewhere, at a point no
+/// curve ends at, though the seam from the curve's end is clear. Healing moves the vertex onto
+/// that end, so the seam runs from where the vertex will be.
+fn from_vertex(
+    raw: &Raw,
+    frame: &Frame,
+    pole: Point3,
+    bounds: &[(bool, Vec<Use>)],
+    k: usize,
+    v: usize,
+) -> Option<(usize, f64)> {
+    let angle = about(frame);
+    bounds[k].1.iter().find_map(|u| {
+        let edge = &raw.edges[u.edge];
+        let (ps, pe) = (raw.points[edge.start], raw.points[edge.end]);
+        let (t0, t1) = edge_range(&edge.curve, ps, pe, edge.start == edge.end)?;
+        [(edge.start, t0), (edge.end, t1)]
+            .into_iter()
+            .filter(|&(w, _)| w == v)
+            .find_map(|(_, at)| {
+                first_met(raw, frame, pole, bounds, k, angle(edge.curve.eval(at)))
+                    .filter(|&(e, t)| ends_at(raw, e, t, v))
+            })
+    })
+}
+
+/// Whether the point of edge `e` at `t` is the edge's end at vertex `v`, as its curve has it: the
+/// curve's point at that end of its range, within the tolerance.
+fn ends_at(raw: &Raw, e: usize, t: f64, v: usize) -> bool {
+    let edge = &raw.edges[e];
+    let (ps, pe) = (raw.points[edge.start], raw.points[edge.end]);
+    let Some((t0, t1)) = edge_range(&edge.curve, ps, pe, edge.start == edge.end) else {
+        return false;
+    };
+    let q = edge.curve.eval(t);
+    [(edge.start, t0), (edge.end, t1)]
+        .iter()
+        .any(|&(w, at)| w == v && edge.curve.eval(at).dist(q) <= tol::LINEAR)
+}
+
+/// The vertex of loop `k` of `bounds` to start a seam at, for the point `q` [`seam_point`] found
+/// on it, if any: the vertex a use of the loop starts at nearest `q`, within what healing may move
+/// a vertex ([`heal::MAX_HEAL`]), where the seam from that vertex to `pole` is clear as well
+/// ([`from_vertex`]). An edge is not split beside such a vertex: one piece would be no longer than
+/// the distance healing closes, as short as nothing where the vertex lies off its curve by a hair,
+/// and healing moves the vertex onto the curve anyway. But the vertex's own meridian or generator
+/// is not `q`'s: a hole may pass between the two, however near the vertex lies, and the seam from
+/// the vertex would then run through it. Where the seam from the nearest vertex is not clear, the
+/// edge is split at `q`, where it is.
+fn vertex_at(
+    raw: &Raw,
+    frame: &Frame,
+    pole: Point3,
+    bounds: &[(bool, Vec<Use>)],
+    k: usize,
+    q: Point3,
+) -> Option<usize> {
+    bounds[k]
+        .1
+        .iter()
+        .map(|u| use_start(raw, u))
+        .map(|v| (raw.points[v].dist(q), v))
+        .filter(|&(d, _)| d <= heal::MAX_HEAL)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, v)| v)
+        .filter(|&v| from_vertex(raw, frame, pole, bounds, k, v).is_some())
+}
+
+/// Turns loop `uses` to start at its vertex `v`.
+fn start_at(raw: &Raw, uses: &mut [Use], v: usize) {
+    if let Some(i) = uses.iter().position(|u| use_start(raw, u) == v) {
+        uses.rotate_left(i);
+    }
+}
+
+/// Splits edge `e` of `raw` at its parameter `t`, after the read, into itself up to a new vertex
+/// there and a new edge on from it, and gives every face's bounds both in its place. Returns the
+/// vertex and the new edge.
+fn split_read_edge(raw: &mut Raw, e: usize, t: f64) -> (usize, usize) {
+    let edge = raw.edges[e].clone();
+    raw.points.push(edge.curve.eval(t));
+    raw.vertex_ids.push(edge.id);
+    let v = raw.points.len() - 1;
+    raw.edges[e].end = v;
+    raw.edges.push(RawEdge { start: v, ..edge });
+    let half = raw.edges.len() - 1;
+    for face in &mut raw.faces {
+        for (_, uses) in &mut face.bounds {
+            *uses = uses
+                .iter()
+                .flat_map(|&u| {
+                    let halves = [u, Use { edge: half, ..u }];
+                    match (u.edge == e, u.reversed) {
+                        (false, _) => vec![u],
+                        (true, false) => halves.to_vec(),
+                        (true, true) => vec![halves[1], halves[0]],
+                    }
+                })
+                .collect();
+        }
+    }
+    (v, half)
+}
+
 /// Moves the cap seam of bound `k` of face `f`, just turned, to the other pole. A sphere face
 /// with one loop round its axis and no seam is read as the cap on the loop's left, given a
 /// meridian up to that cap's pole and back ([`Reader::capped`]); turned, the loop has the other
 /// cap on its left, so the meridian must run to the antipode instead. The seam is told from a
 /// `VERTEX_LOOP`'s, whose pole is the file's vertex and stays, by its pole: a point the read made
-/// for the face, which no other edge uses. The bound is rotated so the seam's two uses close it,
-/// as the read lays them. Nothing else changes: other bounds and surfaces have no seam of the read's.
-fn recap(raw: &mut Raw, f: usize, k: usize) {
+/// for the face, which no other edge uses. The meridian to the new pole starts where the read
+/// starts one ([`seam_point`]), clear of the face's other loops: from the same vertex where its
+/// meridian to the new pole is clear, else from another vertex of the loop or a new one where an
+/// edge of it is split ([`split_read_edge`]); where none is clear, the face is refused. The bound
+/// is rotated so the seam's two uses close it, as the read lays them. Nothing else changes: other
+/// bounds and surfaces have no seam of the read's. Returns the edge split and its new half, where
+/// one was.
+fn recap(raw: &mut Raw, f: usize, k: usize) -> Result<Option<(usize, usize)>> {
     let Surface::Sphere(s) = &raw.faces[f].surface else {
-        return;
+        return Ok(None);
     };
-    let (c, z) = (s.frame.origin, s.frame.z);
+    let (frame, radius) = (s.frame, s.radius);
+    let (c, z) = (frame.origin, frame.z);
     let bound = &raw.faces[f].bounds[k].1;
     let Some(i) = (0..bound.len()).find(|&i| {
         let e = bound[i].edge;
@@ -1924,28 +2188,46 @@ fn recap(raw: &mut Raw, f: usize, k: usize) {
                 .enumerate()
                 .all(|(j, x)| j == e || (x.start != pole && x.end != pole))
     }) else {
-        return;
+        return Ok(None);
     };
     let e = bound[i].edge;
     let (from, pole) = (raw.edges[e].start, raw.edges[e].end);
     let q = c * 2.0 - raw.points[pole];
-    // A meridian from the loop's vertex to the new pole, as `Reader::seam` draws one.
+    // The loop round the pole without the seam, from the seam's vertex on.
+    let without = |raw: &Raw, from: usize| {
+        let mut bounds = raw.faces[f].bounds.clone();
+        bounds[k].1.retain(|u| u.edge != e);
+        start_at(raw, &mut bounds[k].1, from);
+        bounds
+    };
+    let bounds = without(raw, from);
+    let Some((at, t)) = seam_point(raw, &frame, q, &bounds, k) else {
+        return bad(raw.faces[f].id, NO_SEAM);
+    };
+    let (from, split) = match vertex_at(raw, &frame, q, &bounds, k, raw.edges[at].curve.eval(t)) {
+        Some(v) => (v, None),
+        None => {
+            let (v, half) = split_read_edge(raw, at, t);
+            (v, Some((at, half)))
+        }
+    };
+    // A meridian from that vertex to the new pole, as `Reader::seam` draws one.
     let x = raw.points[from] - c;
     let y = (q - c) - x.unit_or_zero() * (q - c).dot(x.unit_or_zero());
-    let Ok(frame) = Frame::new(c, x.cross(y), x) else {
-        return;
+    let Ok(circle) = Frame::new(c, x.cross(y), x) else {
+        return Ok(split);
     };
-    let radius = s.radius;
     raw.points[pole] = q;
-    raw.edges[e].curve = Curve::Circle(Circle { frame, radius });
+    raw.edges[e].start = from;
+    raw.edges[e].curve = Curve::Circle(Circle {
+        frame: circle,
+        radius,
+    });
     // The seam's uses go last: out along it from `from`, and back.
-    let bound = &mut raw.faces[f].bounds[k].1;
-    if let Some(j) = bound.iter().position(|u| u.edge == e && !u.reversed)
-        && bound[(j + 1) % bound.len()].edge == e
-    {
-        let n = bound.len();
-        bound.rotate_left((j + 2) % n);
-    }
+    let mut bound = without(raw, from).swap_remove(k).1;
+    bound.extend([false, true].map(|reversed| Use { edge: e, reversed }));
+    raw.faces[f].bounds[k].1 = bound;
+    Ok(split)
 }
 
 /// Takes each bound of a face on a surface closed both ways in the sense the faces across its
@@ -1955,15 +2237,16 @@ fn recap(raw: &mut Raw, f: usize, k: usize) {
 /// ways; where every use of a bound with a face across it runs the same way as that face's, the
 /// bound is turned. A bound settles once it has a settled face across one of its edges, every
 /// bound of any other face being settled as written, so the sense passes from face to face.
-/// Returns each face with bounds turned and how many.
-fn agree_senses(raw: &mut Raw) -> Vec<(usize, usize)> {
+/// Returns each face with bounds turned and how many; refuses a turned cap whose seam to its new
+/// pole cannot clear its other loops ([`recap`]).
+fn agree_senses(raw: &mut Raw) -> Result<Vec<(usize, usize)>> {
     let mut settled: Vec<Vec<bool>> = raw
         .faces
         .iter()
         .map(|f| vec![!closed_both_ways(&f.surface); f.bounds.len()])
         .collect();
     if settled.iter().flatten().all(|&s| s) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     // Each edge's uses: the face, its bound and whether the use runs against the edge.
     let mut uses: Vec<Vec<(usize, usize, bool)>> = vec![Vec::new(); raw.edges.len()];
@@ -2020,16 +2303,20 @@ fn agree_senses(raw: &mut Raw) -> Vec<(usize, usize)> {
                         x.2 = !x.2;
                     }
                 }
-                recap(raw, f, k);
+                // A seam started on a split edge: its new half has the uses the edge had.
+                if let Some((e, half)) = recap(raw, f, k)? {
+                    debug_assert_eq!(half, uses.len());
+                    uses.push(uses[e].clone());
+                }
                 turned[f] += 1;
             }
         }
     }
-    turned
+    Ok(turned
         .into_iter()
         .enumerate()
         .filter(|&(_, n)| n > 0)
-        .collect()
+        .collect())
 }
 
 /// Builds the solid of a `MANIFOLD_SOLID_BREP` or `BREP_WITH_VOIDS`, healed where its geometry
@@ -2234,7 +2521,7 @@ fn shell_points(raw: &Raw, k: usize) -> Vec<Point3> {
 /// whether this kernel wrote the file.
 fn built(raw: Raw, uncertainty: Option<f64>, ours: bool, strict: bool) -> Result<Shells> {
     let mut file = own_nappes(join_contacts(raw))?;
-    let turned = agree_senses(&mut file);
+    let turned = agree_senses(&mut file)?;
     let names = || file.faces.iter().map(|f| (f.id, f.name.clone())).collect();
     if strict {
         if let Some(why) = heal::misfit(&file) {

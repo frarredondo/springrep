@@ -1668,6 +1668,934 @@ fn caps_without_a_seam_close_on_the_pole_or_apex_they_cover() {
     }
 }
 
+/// The rib of a dome: the part of the ball of radius 5 at the origin between the planes y = ±2
+/// and above the plane z = −3. Its sphere face has one loop round the pole at +z and no seam:
+/// the arcs of the circle of radius 4 at z = −3, between y = ±2, and the arcs over the top of the
+/// circles of radius √21 in y = ±2, starting at the vertex (√12, −2, −3). The meridian from that
+/// vertex leaves the rib at once (the ball widens to radius 5 above it, where |y| reaches 2.5)
+/// and crosses the arc in y = −2 back into it. With `held`, the face also holds its pole, a
+/// `VERTEX_LOOP` at (0, 0, 5), as a file writes where something touches it there.
+fn dome_rib(held: bool) -> String {
+    let x = 12f64.sqrt();
+    let pole = if held {
+        "#92=CARTESIAN_POINT('',(0.,0.,5.));\n#93=VERTEX_POINT('',#92);\n\
+         #94=VERTEX_LOOP('',#93);\n#95=FACE_BOUND('',#94,.T.);\n\
+         #58=ADVANCED_FACE('',(#57,#95),#51,.T.);"
+    } else {
+        "#58=ADVANCED_FACE('',(#57),#51,.T.);"
+    };
+    step_file(&format!(
+        "#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=DIRECTION('',(0.,0.,1.));
+#3=DIRECTION('',(1.,0.,0.));
+#4=DIRECTION('',(0.,-1.,0.));
+#5=DIRECTION('',(0.,1.,0.));
+#6=DIRECTION('',(0.,0.,-1.));
+#7=DIRECTION('',(-1.,0.,0.));
+#10=CARTESIAN_POINT('',({x:?},-2.,-3.));
+#11=VERTEX_POINT('',#10);
+#12=CARTESIAN_POINT('',({x:?},2.,-3.));
+#13=VERTEX_POINT('',#12);
+#14=CARTESIAN_POINT('',({nx:?},2.,-3.));
+#15=VERTEX_POINT('',#14);
+#16=CARTESIAN_POINT('',({nx:?},-2.,-3.));
+#17=VERTEX_POINT('',#16);
+#20=CARTESIAN_POINT('',(0.,0.,-3.));
+#21=AXIS2_PLACEMENT_3D('',#20,#2,#3);
+#22=CIRCLE('',#21,4.);
+#23=EDGE_CURVE('',#11,#13,#22,.T.);
+#24=EDGE_CURVE('',#15,#17,#22,.T.);
+#30=CARTESIAN_POINT('',(0.,2.,0.));
+#31=AXIS2_PLACEMENT_3D('',#30,#4,#3);
+#32=CIRCLE('',#31,{r:?});
+#33=EDGE_CURVE('',#13,#15,#32,.T.);
+#34=CARTESIAN_POINT('',(0.,-2.,0.));
+#35=AXIS2_PLACEMENT_3D('',#34,#4,#3);
+#36=CIRCLE('',#35,{r:?});
+#37=EDGE_CURVE('',#11,#17,#36,.T.);
+#40=VECTOR('',#7,1.);
+#41=LINE('',#12,#40);
+#42=EDGE_CURVE('',#13,#15,#41,.T.);
+#43=VECTOR('',#3,1.);
+#44=LINE('',#16,#43);
+#45=EDGE_CURVE('',#17,#11,#44,.T.);
+#50=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+#51=SPHERICAL_SURFACE('',#50,5.);
+#52=ORIENTED_EDGE('',*,*,#23,.T.);
+#53=ORIENTED_EDGE('',*,*,#33,.T.);
+#54=ORIENTED_EDGE('',*,*,#24,.T.);
+#55=ORIENTED_EDGE('',*,*,#37,.F.);
+#56=EDGE_LOOP('',(#52,#53,#54,#55));
+#57=FACE_OUTER_BOUND('',#56,.T.);
+{pole}
+#60=AXIS2_PLACEMENT_3D('',#30,#5,#3);
+#61=PLANE('',#60);
+#62=ORIENTED_EDGE('',*,*,#33,.F.);
+#63=ORIENTED_EDGE('',*,*,#42,.T.);
+#64=EDGE_LOOP('',(#62,#63));
+#65=FACE_OUTER_BOUND('',#64,.T.);
+#66=ADVANCED_FACE('',(#65),#61,.T.);
+#70=AXIS2_PLACEMENT_3D('',#34,#4,#3);
+#71=PLANE('',#70);
+#72=ORIENTED_EDGE('',*,*,#37,.T.);
+#73=ORIENTED_EDGE('',*,*,#45,.T.);
+#74=EDGE_LOOP('',(#72,#73));
+#75=FACE_OUTER_BOUND('',#74,.T.);
+#76=ADVANCED_FACE('',(#75),#71,.T.);
+#80=AXIS2_PLACEMENT_3D('',#20,#6,#3);
+#81=PLANE('',#80);
+#82=ORIENTED_EDGE('',*,*,#23,.F.);
+#83=ORIENTED_EDGE('',*,*,#45,.F.);
+#84=ORIENTED_EDGE('',*,*,#24,.F.);
+#85=ORIENTED_EDGE('',*,*,#42,.F.);
+#86=EDGE_LOOP('',(#82,#83,#84,#85));
+#87=FACE_OUTER_BOUND('',#86,.T.);
+#88=ADVANCED_FACE('',(#87),#81,.T.);
+#90=CLOSED_SHELL('',(#58,#66,#76,#88));
+#91=MANIFOLD_SOLID_BREP('',#90);",
+        nx = -x,
+        r = 21f64.sqrt(),
+    ))
+}
+
+/// The dome's rib reads as one solid and meshes watertight, with its pole held by a vertex loop
+/// or not. The read gives its sphere face a seam to the pole from a point of the loop nearest the
+/// pole, the top of an arc in y = ±2, so the seam stays inside the face: from the loop's first
+/// vertex, the meridian crosses the face's boundary, and so it would from any of its vertices.
+///
+/// Its volume, slice by slice across y in [−a, a], a = 2: the slice is the disc of radius
+/// ρ = √(R² − y²), R = 5, above the chord at z = −d, d = 3, of area πρ² − ρ² acos(d/ρ) + d√(ρ² −
+/// d²). With k² = R² − d², s = √(k² − y²) and v = R²y − y³/3, so that ∫ρ² dy = v, the terms
+/// integrate to
+///   ∫ πρ² = πv,
+///   ∫ d√(ρ² − d²) = d (y s/2 + (k²/2) asin(y/k)),
+///   ∫ ρ² acos(d/ρ) = v acos(d/ρ) + d ∫ v y / (ρ² s), by parts, where
+///   v y / ρ² = (y² − 2R²)/3 + (2R⁴/3)/(R² − y²), and ∫ dy/((R² − y²) s) = atan(d y/(R s))/(d R)
+/// (R² − k² = d²), with ∫ y²/s = (k²/2) asin(y/k) − y s/2 and ∫ 1/s = asin(y/k) (Gradshteyn &
+/// Ryzhik, *Table of Integrals*, 2.261, 2.271 and 2.284). The integrand is even, so the volume is
+/// twice the antiderivative at y = a.
+#[test]
+fn a_cap_whose_vertex_meridian_leaves_it_is_seamed_from_its_point_nearest_the_pole() {
+    let (r, d, a) = (5.0f64, 3.0f64, 2.0f64);
+    let k = (r * r - d * d).sqrt();
+    let s = (k * k - a * a).sqrt();
+    let rho = (r * r - a * a).sqrt();
+    let v = r * r * a - a.powi(3) / 3.0;
+    let by_parts = d
+        * ((k * k / 2.0 * (a / k).asin() - a * s / 2.0) / 3.0 - 2.0 * r * r / 3.0 * (a / k).asin()
+            + 2.0 * r.powi(4) / 3.0 * (d * a / (r * s)).atan() / (d * r));
+    let along = PI * v - (v * (d / rho).acos() + by_parts)
+        + d * (a * s / 2.0 + k * k / 2.0 * (a / k).asin());
+    let want = 2.0 * along;
+    for held in [false, true] {
+        let imp = read(dome_rib(held).as_bytes(), "rib").unwrap();
+        assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+        assert!(imp.healed.is_empty() && imp.tolerant.is_empty());
+        let b = &imp.brep;
+        assert!(check::check(b).is_empty(), "{:?}", check::check(b));
+        let (area, volume) = measure::area_and_volume(b);
+        assert!((volume - want).abs() <= 1e-9 * want, "{volume} vs {want}");
+        let opt = crate::mesh::MeshOptions::within(0.01);
+        let m = crate::mesh::tessellate(b, &opt).unwrap();
+        let solid = b.solid_ids().next().unwrap();
+        let rep = crate::mesh::report(b, &m, solid);
+        assert!(rep.watertight(), "{rep:?}");
+        assert_eq!(rep.degenerate_triangles, 0);
+        assert!(
+            (rep.volume.abs() - want).abs() <= area * opt.linear,
+            "{}",
+            rep.volume
+        );
+        // The seam runs to the pole from the top of an arc over the top, (0, ±2, √21), the loop's
+        // points nearest the pole.
+        let top = |y: f64| Vec3::new(0.0, y, 21f64.sqrt());
+        let tops = b.vertex_ids().filter(|&x| {
+            [top(2.0), top(-2.0)]
+                .iter()
+                .any(|t| b.vertex(x).point.dist(*t) <= 1e-12)
+        });
+        assert_eq!(tops.count(), 1);
+        round_trip(b);
+    }
+}
+
+/// A file's data section written entity by entity, numbered from #1.
+#[derive(Default)]
+struct Entities(u64, String);
+
+impl Entities {
+    fn put(&mut self, entity: String) -> u64 {
+        self.0 += 1;
+        self.1 += &format!("#{}={entity};\n", self.0);
+        self.0
+    }
+
+    fn point(&mut self, p: Vec3) -> u64 {
+        self.put(format!(
+            "CARTESIAN_POINT('',({:?},{:?},{:?}))",
+            p.x, p.y, p.z
+        ))
+    }
+
+    fn direction(&mut self, d: Vec3) -> u64 {
+        self.put(format!("DIRECTION('',({:?},{:?},{:?}))", d.x, d.y, d.z))
+    }
+
+    fn placement(&mut self, o: Vec3, z: Vec3, x: Vec3) -> u64 {
+        let (o, z, x) = (self.point(o), self.direction(z), self.direction(x));
+        self.put(format!("AXIS2_PLACEMENT_3D('',#{o},#{z},#{x})"))
+    }
+
+    fn vertex(&mut self, p: Vec3) -> u64 {
+        let p = self.point(p);
+        self.put(format!("VERTEX_POINT('',#{p})"))
+    }
+
+    /// The edge from vertex `a` at `pa` to vertex `b` at `pb` along their line.
+    fn line(&mut self, (a, pa): (u64, Vec3), (b, pb): (u64, Vec3)) -> u64 {
+        let (o, d) = (self.point(pa), self.direction((pb - pa).unit_or_zero()));
+        let v = self.put(format!("VECTOR('',#{d},1.)"));
+        let l = self.put(format!("LINE('',#{o},#{v})"));
+        self.put(format!("EDGE_CURVE('',#{a},#{b},#{l},.T.)"))
+    }
+
+    /// The edge from vertex `a` to vertex `b` along the circle of `radius` on `placement`.
+    fn arc(&mut self, a: u64, b: u64, placement: u64, radius: f64) -> u64 {
+        let c = self.put(format!("CIRCLE('',#{placement},{radius:?})"));
+        self.put(format!("EDGE_CURVE('',#{a},#{b},#{c},.T.)"))
+    }
+
+    /// A face on `surface` with `bounds`, each its edges and whether each is used along itself,
+    /// and whether the file says it is used as listed. The first bound is the outer one.
+    fn face(&mut self, surface: u64, bounds: &[(&[(u64, bool)], bool)]) -> u64 {
+        let flag = |b: bool| if b { ".T." } else { ".F." };
+        let mut ids = Vec::new();
+        for (i, &(edges, sense)) in bounds.iter().enumerate() {
+            let used: Vec<String> = edges
+                .iter()
+                .map(|&(e, along)| {
+                    let id = self.put(format!("ORIENTED_EDGE('',*,*,#{e},{})", flag(along)));
+                    format!("#{id}")
+                })
+                .collect();
+            let l = self.put(format!("EDGE_LOOP('',({}))", used.join(",")));
+            let kind = if i == 0 {
+                "FACE_OUTER_BOUND"
+            } else {
+                "FACE_BOUND"
+            };
+            ids.push(format!(
+                "#{}",
+                self.put(format!("{kind}('',#{l},{})", flag(sense)))
+            ));
+        }
+        self.put(format!(
+            "ADVANCED_FACE('',({}),#{surface},.T.)",
+            ids.join(",")
+        ))
+    }
+
+    /// The file of one solid closed by `faces`.
+    fn solid(mut self, faces: &[u64]) -> String {
+        let faces: Vec<String> = faces.iter().map(|f| format!("#{f}")).collect();
+        let shell = self.put(format!("CLOSED_SHELL('',({}))", faces.join(",")));
+        self.put(format!("MANIFOLD_SOLID_BREP('',#{shell})"));
+        step_file(&self.1)
+    }
+}
+
+/// A hole of the ball of radius 5 at the origin: the cap beyond the plane n·p = d cut away, n at
+/// the angle θ from +z and φ about it. Its circle's one vertex lies the way `toward` points from
+/// the circle's centre, square to n.
+#[derive(Clone, Copy)]
+struct Hole {
+    n: Vec3,
+    d: f64,
+    toward: Vec3,
+}
+
+impl Hole {
+    /// The hole at `(θ, φ)` cut at `d`, with its vertex on the circle's parallel of latitude
+    /// about n's, the way φ grows.
+    fn at(theta: f64, phi: f64, d: f64) -> Hole {
+        let n = Vec3::new(
+            theta.sin() * phi.cos(),
+            theta.sin() * phi.sin(),
+            theta.cos(),
+        );
+        let toward = Vec3::new(-phi.sin(), phi.cos(), 0.0);
+        Hole { n, d, toward }
+    }
+
+    /// The volume and the area of the sphere the hole takes from the ball, a cap of height
+    /// h = 5 − d: πh²(15 − h)/3 and 10πh (Archimedes, *On the Sphere and Cylinder*), and the area
+    /// of its disc, π(25 − d²).
+    fn measures(&self) -> (f64, f64, f64) {
+        let h = 5.0 - self.d;
+        (
+            PI * h * h * (15.0 - h) / 3.0,
+            10.0 * PI * h,
+            PI * (25.0 - self.d * self.d),
+        )
+    }
+}
+
+/// The part of the ball of radius 5 at the origin above the plane z = −3, with `holes` cut away:
+/// a sphere face, the disc of radius 4 at z = −3 and a disc for each hole. The sphere face has the
+/// circle at z = −3 for its loop round the pole at +z, one vertex on it at (`vx`, √(16 − vx²), −3),
+/// and the holes' circles for its other loops; a hole's vertex where the circle's is is that
+/// vertex. With `turned`, the file flags the loop round the pole as used against the way it lists
+/// it, `.F.`, and lists it the other way. Returns the file and the solid's volume and area, the
+/// ball's 448π/3 above z = −3 (a cap of height 2 below it holds 52π/3) and 80π + 16π, less what
+/// the holes take, where no two holes meet.
+fn holed_ball(vx: f64, holes: &[Hole], turned: bool) -> (String, f64, f64) {
+    let p = Vec3::new(vx, (16.0 - vx * vx).max(0.0).sqrt(), -3.0);
+    split_holed_ball(&[p], holes, turned)
+}
+
+/// [`holed_ball`] with the circle at z = −3 split at `vertices`, in order round +z, its arcs
+/// between them in turn: the file's vertices, which may lie off the circle, as a file can have a
+/// vertex off its curves by less than healing moves it.
+fn split_holed_ball(vertices: &[Vec3], holes: &[Hole], turned: bool) -> (String, f64, f64) {
+    tilted_holed_ball(0.0, vertices, holes, turned)
+}
+
+/// The axis of the plane that cuts [`tilted_holed_ball`]'s ball, tilted by `tilt` from +z toward
+/// +x, and the direction from its circle's centre to the circle's point at ψ = 0, square to it,
+/// toward −z: n₀ = (sin a, 0, cos a) and e₁ = (cos a, 0, −sin a), a = `tilt`, with
+/// n₀ = e₁ × (0, 1, 0).
+fn tilted_frame(tilt: f64) -> (Vec3, Vec3) {
+    (
+        Vec3::new(tilt.sin(), 0.0, tilt.cos()),
+        Vec3::new(tilt.cos(), 0.0, -tilt.sin()),
+    )
+}
+
+/// The point of [`tilted_holed_ball`]'s circle at the angle ψ about n₀ from e₁ toward +y
+/// ([`tilted_frame`]), moved `out` outward from the circle's centre in its plane: −3n₀ + (4 +
+/// out)(e₁ cos ψ + ŷ sin ψ).
+fn tilted_at(tilt: f64, psi: f64, out: f64) -> Vec3 {
+    let (n, e) = tilted_frame(tilt);
+    n * -3.0 + (e * psi.cos() + Vec3::Y * psi.sin()) * (4.0 + out)
+}
+
+/// [`split_holed_ball`] with the ball cut by the plane n₀·p = −3 instead of z = −3, n₀ tilted by
+/// `tilt` from +z toward +x ([`tilted_frame`]): the circle of radius 4 about −3n₀ in it, split at
+/// `vertices`, in order round n₀. The ball is turned, not changed, so the volume and area are
+/// those of [`split_holed_ball`] where the holes keep clear of the plane. With the plane tilted,
+/// the circle's centre lies off the axis of the sphere, +z, so the half-plane bounded by the axis
+/// through a point moved outward from the circle meets the circle elsewhere than at the point's
+/// nearest point of it: the azimuths about +z of the two differ.
+fn tilted_holed_ball(
+    tilt: f64,
+    vertices: &[Vec3],
+    holes: &[Hole],
+    turned: bool,
+) -> (String, f64, f64) {
+    let (n0, e1) = tilted_frame(tilt);
+    let mut s = Entities::default();
+    let at = s.placement(Vec3::ZERO, Vec3::Z, Vec3::X);
+    let sphere = s.put(format!("SPHERICAL_SURFACE('',#{at},5.)"));
+    let vs: Vec<u64> = vertices.iter().map(|&p| s.vertex(p)).collect();
+    let base = n0 * -3.0;
+    let at = s.placement(base, n0, e1);
+    let arcs: Vec<u64> = (0..vs.len())
+        .map(|i| s.arc(vs[i], vs[(i + 1) % vs.len()], at, 4.0))
+        .collect();
+    let (mut volume, mut area) = (448.0 * PI / 3.0, 96.0 * PI);
+    let round: Vec<(u64, bool)> = if turned {
+        arcs.iter().rev().map(|&e| (e, false)).collect()
+    } else {
+        arcs.iter().map(|&e| (e, true)).collect()
+    };
+    let (mut sphere_bounds, mut discs) = (vec![round], Vec::new());
+    for hole in holes {
+        let (c, r) = (hole.n * hole.d, (25.0 - hole.d * hole.d).sqrt());
+        let x = (hole.toward - hole.n * hole.toward.dot(hole.n)).unit_or_zero();
+        let q = c + x * r;
+        let w = match vertices.iter().position(|p| q.dist(*p) <= 1e-12) {
+            Some(i) => vs[i],
+            None => s.vertex(q),
+        };
+        let at = s.placement(c, hole.n, x);
+        let e = s.arc(w, w, at, r);
+        sphere_bounds.push(vec![(e, false)]);
+        let plane = s.put(format!("PLANE('',#{at})"));
+        discs.push(s.face(plane, &[(&[(e, true)], true)]));
+        let (cap, zone, disc) = hole.measures();
+        volume -= cap;
+        area += disc - zone;
+    }
+    let bounds: Vec<(&[(u64, bool)], bool)> = sphere_bounds
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.as_slice(), i != 0 || !turned))
+        .collect();
+    let mut faces = vec![s.face(sphere, &bounds)];
+    let at = s.placement(base, -n0, e1);
+    let plane = s.put(format!("PLANE('',#{at})"));
+    let under: Vec<(u64, bool)> = arcs.iter().rev().map(|&e| (e, false)).collect();
+    faces.push(s.face(plane, &[(&under, true)]));
+    faces.extend(discs);
+    (s.solid(&faces), volume, area)
+}
+
+/// [`holed_ball`] with the holes at `(θ, φ, d)`, as written.
+fn holed_cap(vx: f64, holes: &[(f64, f64, f64)]) -> String {
+    let holes: Vec<Hole> = holes.iter().map(|&(t, p, d)| Hole::at(t, p, d)).collect();
+    holed_ball(vx, &holes, false).0
+}
+
+/// `text` reads as one solid with nothing rejected, healed or kept with tolerances, checks clean,
+/// has `volume` and `area` to 1e-9 relative, meshes watertight with the mesh volume within
+/// area × deflection, and writes and reads back. Returns how many vertices it has.
+fn reads_exactly(text: &str, name: &str, volume: f64, area: f64) -> usize {
+    reads_healed(text, name, volume, area, None)
+}
+
+/// [`reads_exactly`], but with the solid healed where `moved` is given: its geometry moved by no
+/// more than `moved`, and no surface moved.
+fn reads_healed(text: &str, name: &str, volume: f64, area: f64, moved: Option<f64>) -> usize {
+    let imp = read(text.as_bytes(), "part").unwrap();
+    assert!(imp.rejected.is_empty(), "{name}: {:?}", imp.rejected);
+    assert!(imp.tolerant.is_empty(), "{name}: {:?}", imp.tolerant);
+    match moved {
+        None => assert!(imp.healed.is_empty(), "{name}: {:?}", imp.healed),
+        Some(moved) => assert!(
+            imp.healed.len() == 1 && imp.healed[0].moved <= moved && imp.healed[0].surfaces == 0.0,
+            "{name}: {:?}",
+            imp.healed
+        ),
+    }
+    let b = &imp.brep;
+    assert!(check::check(b).is_empty(), "{name}: {:?}", check::check(b));
+    let (got_area, got) = measure::area_and_volume(b);
+    assert!(
+        (got - volume).abs() <= 1e-9 * volume,
+        "{name}: {got} vs {volume}"
+    );
+    assert!(
+        (got_area - area).abs() <= 1e-9 * area,
+        "{name}: {got_area} vs {area}"
+    );
+    let opt = crate::mesh::MeshOptions::within(0.01);
+    let m = crate::mesh::tessellate(b, &opt).unwrap();
+    let solid = b.solid_ids().next().unwrap();
+    let rep = crate::mesh::report(b, &m, solid);
+    assert!(rep.watertight(), "{name}: {rep:?}");
+    assert_eq!(rep.degenerate_triangles, 0, "{name}");
+    assert!(
+        (rep.volume.abs() - volume).abs() <= area * opt.linear,
+        "{name}: {}",
+        rep.volume
+    );
+    round_trip(b);
+    b.vertex_ids().count()
+}
+
+/// A cap's seam to its pole clears the cap's holes as well as its loop round the pole. The ball
+/// above z = −3 with the cap beyond n·p = 4 cut away, n = (√3/2, 0, 1/2): the hole lies 23.13° to
+/// 96.87° from the pole on the meridian through +x, and the meridian through −x, 60° and more from
+/// n, misses it. From the circle's vertex at (4, 0, −3) the meridian runs through the hole; from
+/// (−4, 0, −3) it does not.
+/// Either way the cut ball reads as one solid and meshes watertight. A cap of the ball of radius
+/// R cut a distance d from its centre holds πh²(3R − h)/3, h = R − d, and its zone of the sphere
+/// is 2πRh (Archimedes): with R = 5, the ball 500π/3, less 52π/3 below z = −3 (h = 2) and 14π/3
+/// beyond n·p = 4 (h = 1), is 434π/3; the sphere face is 2π·5·8 − 2π·5·1 = 70π, and with the
+/// discs of radius 4 and 3 the area is 95π. The vertex at −x starts the seam, as before; from the
+/// one at +x the reader starts it at a new point of the circle, where a meridian meets the circle
+/// before the hole.
+#[test]
+fn a_caps_seam_to_its_pole_clears_its_holes() {
+    let (want, area) = (434.0 * PI / 3.0, 95.0 * PI);
+    let hole = [(PI / 3.0, 0.0, 4.0)];
+    for (sx, vertices) in [(1.0, 4), (-1.0, 3)] {
+        let imp = read(holed_cap(4.0 * sx, &hole).as_bytes(), "cap").unwrap();
+        assert!(imp.rejected.is_empty(), "{sx}: {:?}", imp.rejected);
+        assert!(imp.healed.is_empty() && imp.tolerant.is_empty());
+        let b = &imp.brep;
+        assert!(check::check(b).is_empty(), "{:?}", check::check(b));
+        assert_eq!(b.vertex_ids().count(), vertices, "{sx}");
+        let (got_area, volume) = measure::area_and_volume(b);
+        assert!(
+            (volume - want).abs() <= 1e-9 * want,
+            "{sx}: {volume} vs {want}"
+        );
+        assert!((got_area - area).abs() <= 1e-9 * area, "{sx}: {got_area}");
+        let opt = crate::mesh::MeshOptions::within(0.01);
+        let m = crate::mesh::tessellate(b, &opt).unwrap();
+        let solid = b.solid_ids().next().unwrap();
+        let rep = crate::mesh::report(b, &m, solid);
+        assert!(rep.watertight(), "{rep:?}");
+        assert_eq!(rep.degenerate_triangles, 0);
+        assert!(
+            (rep.volume.abs() - want).abs() <= area * opt.linear,
+            "{}",
+            rep.volume
+        );
+        round_trip(b);
+    }
+}
+
+/// Where holes stand between the pole and the loop round it on every meridian, no seam from the
+/// pole reaches the loop clear of them, and the cap is refused by name. Four holes of angular
+/// radius 20° at 35° from the pole, a quarter turn apart, each shade 2 asin(sin 20°/sin 35°) =
+/// 73.2° of the turn, and four more at 80°, between them, each shade 2 asin(sin 20°/sin 80°) =
+/// 40.6°, which covers the 16.8° gaps the first four leave. All lie nearer the pole than the
+/// loop, 126.87° from it, and no two meet: the nearest centres lie 47.8° apart.
+#[test]
+fn a_cap_whose_holes_shade_its_loop_from_the_pole_all_round_is_refused() {
+    let d = 5.0 * (20f64).to_radians().cos();
+    let holes: Vec<(f64, f64, f64)> = (0..8)
+        .map(|k| {
+            let theta = if k % 2 == 0 { 35f64 } else { 80f64 };
+            (theta.to_radians(), k as f64 * PI / 4.0, d)
+        })
+        .collect();
+    let imp = read(holed_cap(4.0, &holes).as_bytes(), "cap").unwrap();
+    assert_eq!(imp.rejected.len(), 1, "{:?}", imp.rejected);
+    assert!(
+        imp.rejected[0].contains(
+            "no seam from the pole of a face reaches the loop round it clear of its other loops"
+        ),
+        "{:?}",
+        imp.rejected
+    );
+}
+
+/// A cap whose loop round the pole the file flags as used against the way it lists it is read
+/// first as the cap over the other pole, and turned to agree with the discs across its edges; its
+/// seam then runs to the new pole, and starts where a seam the read places there would, clear of
+/// its holes. The cut ball of `a_caps_seam_to_its_pole_clears_its_holes`, so the same 434π/3 and
+/// 95π: from (4, 0, −3) the meridian to the new pole runs through the hole, and the seam starts at
+/// a new point of the circle; from (−4, 0, −3) it starts at the file's vertex.
+#[test]
+fn a_turned_caps_seam_to_its_new_pole_clears_its_holes() {
+    let (want, area) = (434.0 * PI / 3.0, 95.0 * PI);
+    let hole = [Hole::at(PI / 3.0, 0.0, 4.0)];
+    for (sx, vertices) in [(1.0, 4), (-1.0, 3)] {
+        let (text, volume, got_area) = holed_ball(4.0 * sx, &hole, true);
+        assert!((volume - want).abs() <= 1e-12 * want && (got_area - area).abs() <= 1e-12 * area);
+        assert_eq!(reads_exactly(&text, &format!("{sx}"), want, area), vertices);
+    }
+}
+
+/// A seam clears holes that only touch the meridian from the loop's vertex, or reach over it by a
+/// hair, and holes that touch the loop round the pole. Each solid's volume and area are the
+/// ball's above z = −3, 448π/3 and 96π, less each hole's cap, πh²(15 − h)/3, and zone, 10πh, plus
+/// its disc, π(25 − d²), h = 5 − d ([`Hole::measures`]).
+///
+/// - A hole of angular radius β = 30° about the direction at θ = 60° from the pole, φ =
+///   ∓asin(sin β/sin θ) about it, touches the meridian φ = 0 through the vertex (4, 0, −3) at the
+///   angle acos(cos θ/cos β) from the pole (the right spherical triangle of the pole, the centre
+///   and the point of tangency), where its vertex is; at φ = asin(sin β/sin θ) − 1e-6 it reaches
+///   over that meridian.
+/// - The hole beyond the plane x = 4, of radius 3, touches the circle at z = −3 at the vertex (4,
+///   0, −3), its own vertex: 434π/3 and 95π.
+#[test]
+fn a_caps_seam_clears_holes_that_graze_its_vertex_meridian_or_touch_its_loop() {
+    let (theta, beta) = (PI / 3.0, PI / 6.0);
+    let side = (beta.sin() / theta.sin()).asin();
+    let touches = 5.0
+        * Vec3::new(
+            (theta.cos() / beta.cos()).acos().sin(),
+            0.0,
+            theta.cos() / beta.cos(),
+        );
+    let d = 5.0 * beta.cos();
+    let grazing = |phi: f64, toward: Option<Vec3>| {
+        let hole = Hole::at(theta, phi, d);
+        let toward = toward.map_or(hole.toward, |t| t - hole.n * d);
+        Hole { toward, ..hole }
+    };
+    let cases = [
+        ("touching from +y", grazing(side, Some(touches))),
+        ("touching from −y", grazing(-side, Some(touches))),
+        (
+            "reaching over",
+            grazing(side - 1e-6, Some(Vec3::new(0.0, 0.0, 5.0))),
+        ),
+        (
+            "touching the loop",
+            Hole {
+                toward: -Vec3::Z,
+                ..Hole::at(PI / 2.0, 0.0, 4.0)
+            },
+        ),
+    ];
+    for (name, hole) in cases {
+        let (text, volume, area) = holed_ball(4.0, &[hole], false);
+        reads_exactly(&text, name, volume, area);
+    }
+    let (_, volume, area) = holed_ball(4.0, &[cases[3].1], false);
+    assert!(
+        (volume - 434.0 * PI / 3.0).abs() <= 1e-12 * volume
+            && (area - 95.0 * PI).abs() <= 1e-12 * area
+    );
+}
+
+/// Where holes leave the seam one gap a little wider than the spacing of the 64 half-planes, the
+/// read finds it. Four holes of angular radius 20° at 35° from the pole, a quarter turn apart,
+/// shade 2α of the turn each, α = asin(sin 20°/sin 35°) = 36.6°; three of angular radius 20° at
+/// 80°, between them, cover three of the gaps they leave, and a fourth at 80° covers the last from
+/// α + 8° to 90° − α + 1°, leaving 8° clear: at 80° from the pole a hole of angular radius β
+/// shades 2 asin(sin β/sin 80°) of the turn, so its β is asin(sin 80° sin w) for the half-width w.
+#[test]
+fn a_caps_seam_passes_between_holes_through_a_gap_wider_than_its_search_steps() {
+    let deg = PI / 180.0;
+    let d = |beta: f64| 5.0 * beta.cos();
+    let alpha = ((20.0 * deg).sin() / (35.0 * deg).sin()).asin();
+    let mut holes: Vec<Hole> = (0..4)
+        .map(|k| Hole::at(35.0 * deg, k as f64 * PI / 2.0, d(20.0 * deg)))
+        .collect();
+    holes.extend(
+        (1..4).map(|k| Hole::at(80.0 * deg, PI / 4.0 + k as f64 * PI / 2.0, d(20.0 * deg))),
+    );
+    let (lo, hi) = (alpha + 8.0 * deg, PI / 2.0 - alpha + deg);
+    let beta = ((80.0 * deg).sin() * (0.5 * (hi - lo)).sin()).asin();
+    holes.push(Hole::at(80.0 * deg, 0.5 * (lo + hi), d(beta)));
+    let (text, volume, area) = holed_ball(4.0, &holes, false);
+    reads_exactly(&text, "gap", volume, area);
+}
+
+/// The cone of half-angle 45° on the disc of radius 4 at z = 0, apex (0, 0, 4), with a window cut
+/// into its side over the quarter turn 0 ≤ φ ≤ π/2 between z = 1 and z = 2, down to the cylinder
+/// of radius 1: the cone face has the base circle for its loop round the apex, with one vertex at
+/// φ = `phi`, and the window's outline for a hole, two arcs and two generators of the cone. The
+/// generator in y = 0 lies in the half-plane through the vertex at φ = 0, and the one through φ =
+/// π/4 runs through the window.
+fn windowed_cone(phi: f64) -> String {
+    let mut s = Entities::default();
+    let at = s.placement(Vec3::ZERO, -Vec3::Z, Vec3::X);
+    let cone = s.put(format!("CONICAL_SURFACE('',#{at},4.,{:?})", PI / 4.0));
+    let v = s.vertex(Vec3::new(4.0 * phi.cos(), 4.0 * phi.sin(), 0.0));
+    let at = s.placement(Vec3::ZERO, Vec3::Z, Vec3::new(phi.cos(), phi.sin(), 0.0));
+    let base = s.arc(v, v, at, 4.0);
+    // The window's corners on the cone, a to d, and on the cylinder below them, e to h.
+    let corners = [
+        Vec3::new(3.0, 0.0, 1.0),
+        Vec3::new(2.0, 0.0, 2.0),
+        Vec3::new(0.0, 2.0, 2.0),
+        Vec3::new(0.0, 3.0, 1.0),
+        Vec3::new(1.0, 0.0, 1.0),
+        Vec3::new(1.0, 0.0, 2.0),
+        Vec3::new(0.0, 1.0, 2.0),
+        Vec3::new(0.0, 1.0, 1.0),
+    ];
+    let [a, b, c, d, e, f, g, h] = corners.map(|p| (s.vertex(p), p));
+    let level = |s: &mut Entities, z: f64| s.placement(Vec3::new(0.0, 0.0, z), Vec3::Z, Vec3::X);
+    let ab = s.line(a, b);
+    let dc = s.line(d, c);
+    let at = level(&mut s, 2.0);
+    let bc = s.arc(b.0, c.0, at, 2.0);
+    let fg = s.arc(f.0, g.0, at, 1.0);
+    let at = level(&mut s, 1.0);
+    let ad = s.arc(a.0, d.0, at, 3.0);
+    let eh = s.arc(e.0, h.0, at, 1.0);
+    let (bf, gc, hd, ea, ef, hg) = (
+        s.line(b, f),
+        s.line(g, c),
+        s.line(h, d),
+        s.line(e, a),
+        s.line(e, f),
+        s.line(h, g),
+    );
+    let mut faces = vec![s.face(
+        cone,
+        &[
+            (&[(base, true)], true),
+            (&[(ab, true), (bc, true), (dc, false), (ad, false)], true),
+        ],
+    )];
+    let mut plane = |s: &mut Entities, o: Vec3, z: Vec3, x: Vec3, edges: &[(u64, bool)]| {
+        let at = s.placement(o, z, x);
+        let p = s.put(format!("PLANE('',#{at})"));
+        faces.push(s.face(p, &[(edges, true)]));
+    };
+    plane(&mut s, Vec3::ZERO, -Vec3::Z, Vec3::X, &[(base, false)]);
+    let (up, low) = (Vec3::new(0.0, 0.0, 2.0), Vec3::new(0.0, 0.0, 1.0));
+    plane(
+        &mut s,
+        up,
+        -Vec3::Z,
+        Vec3::X,
+        &[(bc, false), (bf, true), (fg, true), (gc, true)],
+    );
+    plane(
+        &mut s,
+        low,
+        Vec3::Z,
+        Vec3::X,
+        &[(ad, true), (hd, false), (eh, false), (ea, true)],
+    );
+    plane(
+        &mut s,
+        Vec3::ZERO,
+        Vec3::Y,
+        Vec3::X,
+        &[(ef, true), (bf, false), (ab, false), (ea, false)],
+    );
+    plane(
+        &mut s,
+        Vec3::ZERO,
+        Vec3::X,
+        Vec3::Y,
+        &[(dc, true), (gc, false), (hg, false), (hd, true)],
+    );
+    let at = s.placement(Vec3::ZERO, Vec3::Z, Vec3::X);
+    let cylinder = s.put(format!("CYLINDRICAL_SURFACE('',#{at},1.)"));
+    faces.push(s.face(
+        cylinder,
+        &[(&[(eh, true), (hg, true), (fg, false), (ef, false)], true)],
+    ));
+    s.solid(&faces)
+}
+
+/// A cone's seam to its apex clears a hole in its side, from a vertex whose generator runs through
+/// the hole or along its side. The cone holds 64π/3 (πr²h/3, r = h = 4); the window takes a
+/// quarter of the frustum between z = 1 and z = 2 less the cylinder within it, (π/4)(∫₁² (4 −
+/// z)² dz − 1) = (π/4)(19/3 − 1) = 4π/3, leaving 20π. The area: the cone's side, πr·√2r = 16√2π,
+/// less a quarter of the frustum's, π(3 + 2)√2/4, the base 16π, the window's floor and ceiling
+/// (π/4)(9 − 1) and (π/4)(4 − 1), its back, a quarter of the cylinder's 2π, and its two sides,
+/// trapezia of area 3/2.
+#[test]
+fn a_cones_seam_to_its_apex_clears_a_window_in_its_side() {
+    let volume = 20.0 * PI;
+    let area = 16.0 * 2f64.sqrt() * PI - 5.0 * 2f64.sqrt() * PI / 4.0
+        + 16.0 * PI
+        + 2.0 * PI
+        + 0.75 * PI
+        + 0.5 * PI
+        + 3.0;
+    for phi in [0.0, PI / 4.0, PI] {
+        reads_exactly(&windowed_cone(phi), &format!("{phi}"), volume, area);
+    }
+}
+
+/// The cone of half-angle 45° on the disc of radius 4 at z = 0, apex (0, 0, 4): the cone face has
+/// the base circle for its loop round the apex, with one vertex at `p`, which may lie off the
+/// circle. It holds 64π/3 (πr²h/3, r = h = 4), and its area is the side's πr·√2r = 16√2π and the
+/// base's 16π.
+fn cone_on(p: Vec3) -> String {
+    let mut s = Entities::default();
+    let at = s.placement(Vec3::ZERO, -Vec3::Z, Vec3::X);
+    let cone = s.put(format!("CONICAL_SURFACE('',#{at},4.,{:?})", PI / 4.0));
+    let v = s.vertex(p);
+    let at = s.placement(Vec3::ZERO, Vec3::Z, Vec3::X);
+    let base = s.arc(v, v, at, 4.0);
+    let mut faces = vec![s.face(cone, &[(&[(base, true)], true)])];
+    let at = s.placement(Vec3::ZERO, -Vec3::Z, Vec3::X);
+    let plane = s.put(format!("PLANE('',#{at})"));
+    faces.push(s.face(plane, &[(&[(base, false)], true)]));
+    s.solid(&faces)
+}
+
+/// A cap whose loop's vertices lie off their circle by δ, less than healing moves a vertex, reads
+/// as the same cap with them on it, healed: the seam starts at the vertex where it starts on the
+/// circle, told by the edges that end there, and no edge is split beside a vertex. Each vertex
+/// lies δ = 2e-7 to 1e-3 mm off the circle of radius 4 at z = −3, outward or up: the nearest point
+/// of the circle is δ away, and healing moves the vertex there, no further. The surfaces stay,
+/// so the measures are those of the exact solid:
+///
+/// - the ball above z = −3, 448π/3 and 96π, its vertex at (4 + δ, 0, −3) or (4, 0, −3 + δ), as
+///   written and with its loop turned;
+/// - the ball cut by the hole of `a_caps_seam_to_its_pole_clears_its_holes`, 434π/3 and 95π, its
+///   vertex at −x, where the seam starts, and at +x, where a new vertex starts it, as written and
+///   turned;
+/// - that cut ball with its circle in four arcs, a vertex at each quarter turn, each 1e-6 off
+///   outward, as written and turned;
+/// - the cone of [`cone_on`], 64π/3 and 16√2π + 16π, its base vertex at (4 + δ, 0, 0) or
+///   (4, 0, δ).
+///
+/// Each has as many vertices as the cap with its vertices on the circle.
+///
+/// Nor is an edge split beside a vertex where the seam's start is found among half-planes about
+/// the axis: the cut ball with its circle in two arcs, from the vertex at +x, whose meridian runs
+/// through the hole, to one at φ = π + ε, ε = 5e-8 to 2.5e-6, beside the start the search finds
+/// at φ = π, the middle of the half-planes clear of the hole, which is symmetric about y = 0. The
+/// seam starts at that vertex rather than at a new one 4ε from it, and the solid has as many
+/// vertices as with ε = 0.
+#[test]
+fn a_caps_loop_vertex_off_its_circle_by_less_than_healing_moves_it_is_healed_onto_it() {
+    let hole = Hole::at(PI / 3.0, 0.0, 4.0);
+    let at = |phi: f64, out: f64, up: f64| {
+        Vec3::new((4.0 + out) * phi.cos(), (4.0 + out) * phi.sin(), -3.0 + up)
+    };
+    let both = |d: f64| [(d, 0.0), (0.0, d)];
+    for d in [2e-7, 1e-6, 1e-5, 1e-4, 1e-3] {
+        let reach = Some(d * (1.0 + 1e-9));
+        for (out, up) in both(d) {
+            for turned in [false, true] {
+                let name = format!("δ = {d:e} out {out:e} up {up:e}, turned {turned}");
+                for (phi, holes) in [(0.0, &[][..]), (PI, &[hole][..]), (0.0, &[hole][..])] {
+                    let (text, volume, area) = split_holed_ball(&[at(phi, out, up)], holes, turned);
+                    let (exact, ..) = split_holed_ball(&[at(phi, 0.0, 0.0)], holes, turned);
+                    let name = format!("{name}, φ {phi}, {} holes", holes.len());
+                    assert_eq!(
+                        reads_healed(&text, &name, volume, area, reach),
+                        reads_exactly(&exact, &name, volume, area),
+                        "{name}"
+                    );
+                }
+            }
+            let (volume, area) = (64.0 * PI / 3.0, 16.0 * 2f64.sqrt() * PI + 16.0 * PI);
+            let p = Vec3::new(4.0 + out, 0.0, up);
+            let name = format!("cone, δ = {d:e} out {out:e} up {up:e}");
+            assert_eq!(
+                reads_healed(&cone_on(p), &name, volume, area, reach),
+                reads_exactly(&cone_on(Vec3::new(4.0, 0.0, 0.0)), &name, volume, area),
+            );
+        }
+    }
+    for turned in [false, true] {
+        let halves = |e: f64| [at(0.0, 0.0, 0.0), at(PI + e, 0.0, 0.0)];
+        let (exact, volume, area) = split_holed_ball(&halves(0.0), &[hole], turned);
+        let vertices = reads_exactly(&exact, "two arcs", volume, area);
+        for e in [5e-8, 2.5e-7, 2.5e-6] {
+            let (text, ..) = split_holed_ball(&halves(e), &[hole], turned);
+            let name = format!("two arcs, ε = {e:e}, turned {turned}");
+            assert_eq!(
+                reads_exactly(&text, &name, volume, area),
+                vertices,
+                "{name}"
+            );
+        }
+    }
+    let quarters = [0.0, PI / 2.0, PI, 1.5 * PI];
+    for turned in [false, true] {
+        let off: Vec<Vec3> = quarters.iter().map(|&phi| at(phi, 1e-6, 0.0)).collect();
+        let on: Vec<Vec3> = quarters.iter().map(|&phi| at(phi, 0.0, 0.0)).collect();
+        let (text, volume, area) = split_holed_ball(&off, &[hole], turned);
+        let (exact, ..) = split_holed_ball(&on, &[hole], turned);
+        let name = format!("four arcs, turned {turned}");
+        assert_eq!(
+            reads_healed(&text, &name, volume, area, Some(1e-6 * (1.0 + 1e-9))),
+            reads_exactly(&exact, &name, volume, area),
+            "{name}"
+        );
+    }
+}
+
+/// The azimuth about +z of `p`, in [0, 2π).
+fn azimuth(p: Vec3) -> f64 {
+    p.y.atan2(p.x).rem_euclid(TAU)
+}
+
+/// A hole whose rim passes between the meridians at azimuths `clear` and `cut`, square to the
+/// meridian midway between them, crossing the one at `cut` and missing the one at `clear`: its
+/// centre 60° from the pole, 30° from `clear` the way `cut` lies, and its angular radius β its
+/// angular distance from the meridian at the azimuth m midway, sin β = sin 60° sin |φ − m| (the
+/// right spherical triangle of the pole, the centre and the foot of the perpendicular on the
+/// meridian), its vertex toward the pole.
+fn wedge_hole(clear: f64, cut: f64) -> Hole {
+    let theta = PI / 3.0;
+    let phi = clear + (cut - clear).signum() * PI / 6.0;
+    let mid = 0.5 * (clear + cut);
+    let beta = (theta.sin() * (phi - mid).abs().sin()).asin();
+    Hole {
+        toward: Vec3::Z,
+        ..Hole::at(theta, phi, 5.0 * beta.cos())
+    }
+}
+
+/// A cap whose loop's vertex lies off its circle, the circle's centre off the sphere's axis, is
+/// seamed from that vertex, as where it lies on the circle: the meridian the seam follows is the
+/// one through the circle's end at the vertex, where healing moves the vertex, not the one through
+/// the vertex's point, which meets the circle elsewhere. The ball of radius 5 cut by the plane
+/// n₀·p = −3, n₀ tilted 10° from +z ([`tilted_holed_ball`]), with one vertex at ψ = π/2 moved δ =
+/// 1e-6 to 1e-2 outward in the plane: (−3 sin 10°, 4 + δ, −3 cos 10°), whose azimuth about +z
+/// differs from its nearest point of the circle's by about 3δ sin 10°/(16 + 9 sin² 10°), so that
+/// the half-plane through it meets the circle some 0.13δ from that point, beyond the tolerance
+/// from δ = 1e-6 up. It reads as the cap with its vertex on the circle, healed by δ, with the same
+/// 2 vertices, the loop's and the pole's, as written and turned: 448π/3 and 96π, the ball's above
+/// a plane 3 from its centre ([`holed_ball`]). Healing moves the vertex by δ to within 1e-10 mm:
+/// the tilted circle's frame and the vertex are written to 17 digits, about 5 mm from the origin,
+/// which leaves the distance between them a few 1e-12 mm off δ.
+#[test]
+fn a_tilted_caps_vertex_off_its_circle_starts_its_seam() {
+    let tilt = 10f64.to_radians();
+    for turned in [false, true] {
+        let exact = tilted_holed_ball(tilt, &[tilted_at(tilt, PI / 2.0, 0.0)], &[], turned);
+        let (volume, area) = (exact.1, exact.2);
+        assert!(
+            (volume - 448.0 * PI / 3.0).abs() <= 1e-12 * volume
+                && (area - 96.0 * PI).abs() <= 1e-12 * area
+        );
+        assert_eq!(reads_exactly(&exact.0, "on the circle", volume, area), 2);
+        for d in [1e-6, 1e-5, 1e-4, 1e-3, 1e-2] {
+            let (text, ..) = tilted_holed_ball(tilt, &[tilted_at(tilt, PI / 2.0, d)], &[], turned);
+            let name = format!("δ = {d:e}, turned {turned}");
+            let reach = Some(d + 1e-10);
+            assert_eq!(reads_healed(&text, &name, volume, area, reach), 2, "{name}");
+        }
+    }
+}
+
+/// The seam starts at a loop's vertex near the point the read finds for it only where the seam
+/// from that vertex is clear too. The tilted cap of
+/// `a_tilted_caps_vertex_off_its_circle_starts_its_seam`, its loop's point nearest the pole q at
+/// ψ = π, azimuth π, with vertices A and B at ψ = 0 and ψ = π + s, B a distance of about 4s =
+/// 0.01 to 0.049 mm from q, within what healing moves a vertex ([`crate::step::MAX_HEAL`]):
+///
+/// - A hole of angular radius 20° 60° from the pole on A's meridian, azimuth 0, takes the seam
+///   from A; a second, a [`wedge_hole`], passes between q's meridian and B's, about
+///   5 asin(sin 60° sin(φ_B − π)/2) mm from each, 4.8e-3 mm and more, and takes the seam from B:
+///   the read splits the circle at q and starts the seam there. Six vertices: A, B, q, the holes'
+///   and the pole's.
+/// - Without the second hole, the seam from B is clear, and the read starts it at B rather than
+///   split the circle beside it: four vertices, A, B, the hole's and the pole's.
+///
+/// Each hole lies within 90° of the pole, and the circle 116.87° and more from it (126.87°, its
+/// angle from n₀, less the tilt), so the solid holds 448π/3 and 96π less what each hole takes
+/// ([`Hole::measures`]).
+#[test]
+fn a_caps_seam_starts_at_a_vertex_near_its_point_only_where_the_vertex_is_clear() {
+    let tilt = 10f64.to_radians();
+    let blocking = Hole {
+        toward: Vec3::Z,
+        ..Hole::at(PI / 3.0, 0.0, 5.0 * (20f64).to_radians().cos())
+    };
+    for d in [0.01, 0.02, 0.04, 0.049] {
+        let b = tilted_at(tilt, PI + d / 4.0, 0.0);
+        assert!(b.dist(tilted_at(tilt, PI, 0.0)) < crate::step::MAX_HEAL);
+        let vertices = [tilted_at(tilt, 0.0, 0.0), b];
+        for turned in [false, true] {
+            let name = format!("|qB| = {d} mm, turned {turned}");
+            let holes = [blocking, wedge_hole(PI, azimuth(b))];
+            let (text, volume, area) = tilted_holed_ball(tilt, &vertices, &holes, turned);
+            assert_eq!(reads_exactly(&text, &name, volume, area), 6, "{name}");
+            let (text, volume, area) = tilted_holed_ball(tilt, &vertices, &holes[..1], turned);
+            assert_eq!(reads_exactly(&text, &name, volume, area), 4, "{name}");
+        }
+    }
+}
+
+/// A vertex off its circle that starts a clear seam keeps it where another vertex lies near the
+/// loop's point nearest the pole with a hole across its meridian. The tilted cap of
+/// `a_tilted_caps_vertex_off_its_circle_starts_its_seam`, its first vertex A at ψ = π/2 moved δ =
+/// 0 to 1e-3 outward, its meridian clear, and a second vertex B at ψ = π + s, 0.04 or 0.06 mm
+/// from q at ψ = π, with a [`wedge_hole`] between q's meridian and B's. The seam starts at A, as
+/// with A on the circle: four vertices, A, B, the hole's and the pole's, healed by δ where A lies
+/// off the circle, as written and turned (to within 1e-10 mm, as in
+/// `a_tilted_caps_vertex_off_its_circle_starts_its_seam`).
+#[test]
+fn a_caps_vertex_off_its_circle_keeps_its_clear_seam_beside_a_vertex_near_its_point() {
+    let tilt = 10f64.to_radians();
+    for d in [0.04, 0.06] {
+        let b = tilted_at(tilt, PI + d / 4.0, 0.0);
+        let holes = [wedge_hole(PI, azimuth(b))];
+        for turned in [false, true] {
+            for off in [0.0, 1e-6, 1e-4, 1e-3] {
+                let vertices = [tilted_at(tilt, PI / 2.0, off), b];
+                let (text, volume, area) = tilted_holed_ball(tilt, &vertices, &holes, turned);
+                let name = format!("|qB| = {d} mm, δ = {off:e}, turned {turned}");
+                let reach = (off > 0.0).then_some(off + 1e-10);
+                assert_eq!(reads_healed(&text, &name, volume, area, reach), 4, "{name}");
+            }
+        }
+    }
+}
+
 /// The text of `b` with its first cylinder written as an offset by `d` of a cylinder `d`
 /// thinner, or of `basis` where given.
 fn with_offset_cylinder(b: &Brep, d: f64, basis: Option<&str>) -> String {
