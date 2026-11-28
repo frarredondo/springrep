@@ -188,3 +188,24 @@ fn a_relationship_can_place_the_child_in_rep_2() {
     }
     reads_back_where_placed(&text);
 }
+
+#[test]
+fn a_use_with_inconsistent_placement_links_is_rejected() {
+    let text = written();
+    let entity = "=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(";
+    let mut links = text.lines().filter(|line| line.contains(entity));
+    let upright = links.nth(1).unwrap();
+    let laid_down = links.next().unwrap().split_once(entity).unwrap().1;
+    let (laid_down_rel, _) = laid_down.split_once(',').unwrap();
+    let (_, shape) = upright.split_once(',').unwrap();
+    for relationship in [laid_down_rel, "$"] {
+        let extra = format!("#900001{entity}{relationship},{shape}");
+        for links in [format!("{upright}\n{extra}"), format!("{extra}\n{upright}")] {
+            let input = text.replacen(upright, &links, 1);
+            let import = step::read(input.as_bytes(), "in").unwrap();
+            let instances: Vec<_> = import.bodies.into_iter().map(|b| b.instance).collect();
+            assert_eq!(instances, [["base"], ["post-b"]], "{:?}", import.rejected);
+            assert_eq!(import.rejected.len(), 1, "{:?}", import.rejected);
+        }
+    }
+}
