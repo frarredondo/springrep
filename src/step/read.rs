@@ -247,14 +247,17 @@ fn representation(f: &File, id: u64) -> Option<(Vec<u64>, Option<u64>)> {
     Some((refs(p.get(1)), p.get(2).and_then(Param::as_ref)))
 }
 
+/// The relationships that place one assembly use, `None` where a link leaves it unset.
+type Rels = Vec<Option<u64>>;
+
 struct Assembly<'a> {
     file: &'a File,
     /// Representations joined without a transformation (a part's shape and its B-rep).
     links: HashMap<u64, Vec<u64>>,
     /// Each product definition's shape representations.
     reps: HashMap<u64, Vec<u64>>,
-    /// Each product definition's children: the child, the relation that places it, and the use.
-    children: HashMap<u64, Vec<(u64, u64, u64)>>,
+    /// Each product definition's children: the child, the relations that place it, and the use.
+    children: HashMap<u64, Vec<(u64, Rels, u64)>>,
     related: HashSet<u64>,
 }
 
@@ -267,7 +270,7 @@ impl<'a> Assembly<'a> {
             children: HashMap::new(),
             related: HashSet::new(),
         };
-        let mut nauo_place: HashMap<u64, u64> = HashMap::new();
+        let mut nauo_place: HashMap<u64, Rels> = HashMap::new();
         for e in &file.entities {
             if let Some(p) = e.part("SHAPE_DEFINITION_REPRESENTATION") {
                 let (Some(pds), Some(rep)) = (
@@ -282,7 +285,7 @@ impl<'a> Assembly<'a> {
                     a.reps.entry(pd).or_default().push(rep);
                 }
             } else if let Some(p) = e.part("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION") {
-                let (Some(rel), Some(pds)) = (
+                let (rel, Some(pds)) = (
                     p.first().and_then(Param::as_ref),
                     p.get(1).and_then(Param::as_ref),
                 ) else {
@@ -291,7 +294,7 @@ impl<'a> Assembly<'a> {
                 if let Some(nauo) = params(file, pds, "PRODUCT_DEFINITION_SHAPE")
                     .and_then(|q| q.get(2).and_then(Param::as_ref))
                 {
-                    nauo_place.insert(nauo, rel);
+                    nauo_place.entry(nauo).or_default().push(rel);
                 }
             } else if !e.has("REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION")
                 && let Some(p) = e.part("REPRESENTATION_RELATIONSHIP").or_else(|| {
@@ -316,7 +319,7 @@ impl<'a> Assembly<'a> {
                 ) else {
                     continue;
                 };
-                if let Some(&rel) = nauo_place.get(&id) {
+                if let Some(rel) = nauo_place.remove(&id) {
                     a.children.entry(parent).or_default().push((child, rel, id));
                     a.related.insert(child);
                 }
@@ -481,6 +484,20 @@ impl<'a> Assembly<'a> {
         }
     }
 
+    /// The motion that places `child` for one use, on which all its placing relations agree.
+    fn use_placing(&self, geo: &mut Geometry, child: u64, rels: &[Option<u64>]) -> Result<Placing> {
+        let mut found = Vec::new();
+        for &rel in rels {
+            let rel = rel.ok_or_else(|| Error::InvalidInput("STEP: unset relationship".into()))?;
+            found.push(self.placement(geo, child, rel)?);
+        }
+        let agree = found.iter().all(|p| found.iter().all(|q| p.agrees_with(q)));
+        match found[..] {
+            [p, ..] if agree => Ok(p),
+            _ => Err(Error::InvalidInput("STEP: conflicting placements".into())),
+        }
+    }
+
     /// Places `pd` and its children at `at`. `path` holds the products above it, so an assembly
     /// that contains itself is an error. With no placement, the walk only checks product links.
     fn walk(
@@ -508,8 +525,8 @@ impl<'a> Assembly<'a> {
                 p.product = Some(pd);
             }
         }
-        for &(child, rel, used) in self.children.get(&pd).into_iter().flatten() {
-            let child_at = at.and_then(|at| match self.placement(geo, child, rel) {
+        for &(child, ref rels, used) in self.children.get(&pd).into_iter().flatten() {
+            let child_at = at.and_then(|at| match self.use_placing(geo, child, rels) {
                 Ok(t) => Some(t.then(at)),
                 Err(e) => {
                     out.rejected.push(format!("#{used}: {e}"));

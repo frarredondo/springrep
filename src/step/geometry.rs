@@ -89,6 +89,13 @@ impl Placing {
         x * v.x + y * v.y + z * v.z
     }
 
+    /// Whether two placements agree within the kernel's linear and angular tolerances.
+    pub(super) fn agrees_with(&self, other: &Self) -> bool {
+        tol::within(self.origin.dist(other.origin), tol::LINEAR, self.origin)
+            && (self.scale - other.scale).abs() <= tol::ANGULAR * self.scale.max(other.scale)
+            && (0..3).all(|i| self.basis[i].dist(other.basis[i]) <= tol::ANGULAR)
+    }
+
     /// Applies the basis and origin to a point already in scaled units.
     pub(super) fn place_scaled_point(&self, p: Point3) -> Point3 {
         self.origin + self.vector(p)
