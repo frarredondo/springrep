@@ -89,11 +89,24 @@ impl Placing {
         x * v.x + y * v.y + z * v.z
     }
 
-    /// Whether two placements agree within the kernel's linear and angular tolerances.
-    pub(super) fn agrees_with(&self, other: &Self) -> bool {
-        tol::within(self.origin.dist(other.origin), tol::LINEAR, self.origin)
-            && (self.scale - other.scale).abs() <= tol::ANGULAR * self.scale.max(other.scale)
-            && (0..3).all(|i| self.basis[i].dist(other.basis[i]) <= tol::ANGULAR)
+    /// If the placements disagree at `distance`, their largest gap in mm, measuring basis and
+    /// relative scale differences across the kernel's model size.
+    pub(super) fn gap_beyond(&self, other: &Self, distance: f64) -> Option<f64> {
+        let origin_gap = self.origin.dist(other.origin);
+        let scale = self.scale.max(other.scale);
+        let scale_gap = (self.scale - other.scale).abs();
+        let basis_gaps = (0..3).map(|i| self.basis[i].dist(other.basis[i]));
+        let relative = distance / tol::MODEL_SIZE;
+        if tol::within(origin_gap, distance, self.origin)
+            && tol::within(origin_gap, distance, other.origin)
+            && scale_gap <= relative * scale
+            && basis_gaps.clone().all(|gap| gap <= relative)
+        {
+            None
+        } else {
+            let relative_gap = basis_gaps.fold(scale_gap / scale, f64::max);
+            Some(origin_gap.max(relative_gap * tol::MODEL_SIZE))
+        }
     }
 
     /// Applies the basis and origin to a point already in scaled units.

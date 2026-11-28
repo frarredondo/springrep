@@ -206,6 +206,9 @@ fn a_use_with_inconsistent_placement_links_is_rejected() {
             let instances: Vec<_> = import.bodies.into_iter().map(|b| b.instance).collect();
             assert_eq!(instances, [["base"], ["post-b"]], "{:?}", import.rejected);
             assert_eq!(import.rejected.len(), 1, "{:?}", import.rejected);
+            if relationship == "$" {
+                assert!(import.rejected[0].contains("STEP #900001: unset relationship"));
+            }
         }
     }
 }
@@ -253,13 +256,31 @@ fn duplicate_placements_must_agree_within_the_parent_contexts_uncertainty() {
             ),
             1,
         );
+        let import = step::read(input.as_bytes(), "in").unwrap();
         if z < 40.001 {
-            reads_back_where_placed(&input);
+            assert!(import.rejected.is_empty(), "{:?}", import.rejected);
+            assert_eq!(import.bodies.len(), 3);
+            let post = &import.bodies[1];
+            assert_eq!(post.instance, ["post-a"]);
+            let bounds = measure::solid_bbox(&import.brep, post.solid);
+            assert!((bounds.min.z - 40.0).abs() <= springrep::tol::LINEAR);
+            let [adjustment] = &import.placement_adjustments[..] else {
+                panic!("{:?}", import.placement_adjustments);
+            };
+            assert_eq!(format!("#{}", adjustment.chosen), relation);
+            assert_eq!(adjustment.relationships, (adjustment.chosen, 900002));
+            assert!((adjustment.moved - 0.0005).abs() <= springrep::tol::LINEAR);
         } else {
-            let import = step::read(input.as_bytes(), "in").unwrap();
             let instances: Vec<_> = import.bodies.into_iter().map(|b| b.instance).collect();
             assert_eq!(instances, [["base"], ["post-b"]], "{:?}", import.rejected);
             assert_eq!(import.rejected.len(), 1, "{:?}", import.rejected);
+            let expected = format!("STEP {relation}, #900002: placements differ by 2.0e-3 mm");
+            assert!(
+                import.rejected[0].contains(&expected),
+                "{:?}",
+                import.rejected
+            );
+            assert!(import.placement_adjustments.is_empty());
         }
     }
 }
