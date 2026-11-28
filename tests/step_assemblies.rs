@@ -154,3 +154,37 @@ fn an_instance_of_a_part_the_file_lacks_is_invalid() {
         Err(Error::InvalidInput(_))
     ));
 }
+
+#[test]
+fn a_relationship_to_another_parts_shape_cannot_place_the_child() {
+    let text = written();
+    let relation = "=(REPRESENTATION_RELATIONSHIP('','',";
+    let mut links = text.lines().filter(|line| line.contains(relation));
+    let block = links.next().unwrap();
+    let (_, post_endpoints) = links.next().unwrap().split_once(relation).unwrap();
+    let (post_rep, _) = post_endpoints.split_once(',').unwrap();
+    let (start, endpoints) = block.split_once(relation).unwrap();
+    let (_, rest) = endpoints.split_once(',').unwrap();
+    let text = text.replacen(block, &format!("{start}{relation}{post_rep},{rest}"), 1);
+    let import = step::read(text.as_bytes(), "in").unwrap();
+    let instances: Vec<_> = import.bodies.into_iter().map(|b| b.instance).collect();
+    let rejected = import.rejected;
+    assert_eq!(instances, [["post-a"], ["post-b"]], "{rejected:?}");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+}
+
+#[test]
+fn a_relationship_can_place_the_child_in_rep_2() {
+    let mut text = written();
+    for entity in [
+        "=ITEM_DEFINED_TRANSFORMATION('','',",
+        "=(REPRESENTATION_RELATIONSHIP('','',",
+    ] {
+        let line = text.lines().rfind(|line| line.contains(entity)).unwrap();
+        let (start, args) = line.split_once(entity).unwrap();
+        let (pair, rest) = args.split_once(')').unwrap();
+        let (first, second) = pair.split_once(',').unwrap();
+        text = text.replacen(line, &format!("{start}{entity}{second},{first}){rest}"), 1);
+    }
+    reads_back_where_placed(&text);
+}

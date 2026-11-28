@@ -570,6 +570,29 @@ fn assemblies_place_each_instance_in_file_units() {
     assert_eq!(b.name_counts().len(), 12);
 }
 
+#[test]
+fn a_subassembly_without_a_shape_definition_representation_is_placed() {
+    let text = assembly_text(false).replace(
+        "#9015=SHAPE_DEFINITION_REPRESENTATION(#9013,#9014);",
+        "#9200=PRODUCT('root','root','',(#3));
+#9201=PRODUCT_DEFINITION_FORMATION('','',#9200);
+#9202=PRODUCT_DEFINITION('design','',#9201,#6);
+#9203=PRODUCT_DEFINITION_SHAPE('','',#9202);
+#9204=SHAPE_REPRESENTATION('root',(#9030),#9099);
+#9205=SHAPE_DEFINITION_REPRESENTATION(#9203,#9204);
+#9206=NEXT_ASSEMBLY_USAGE_OCCURRENCE('1','subassembly','',#9202,#9012,$);
+#9207=PRODUCT_DEFINITION_SHAPE('','',#9206);
+#9208=ITEM_DEFINED_TRANSFORMATION('','',#9020,#9030);
+#9209=(REPRESENTATION_RELATIONSHIP('','',#9014,#9204) \
+       REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#9208) SHAPE_REPRESENTATION_RELATIONSHIP());
+#9210=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#9209,#9207);",
+    );
+    let import = read(text.as_bytes(), "imp").unwrap();
+    assert!(import.rejected.is_empty(), "{:?}", import.rejected);
+    assert_eq!(import.bodies.len(), 2);
+    assert!((measure::bbox(&import.brep).min.x - 10.0).abs() < crate::tol::LINEAR);
+}
+
 /// The text of `b` written as STEP with the point of its first vertex moved by `d`.
 fn with_vertex_moved(b: &Brep, d: Vec3) -> String {
     let text = write(b, "blk").unwrap();

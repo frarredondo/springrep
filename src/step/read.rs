@@ -451,7 +451,17 @@ impl<'a> Assembly<'a> {
             .flatten()
             .flat_map(|&r| self.linked(r))
             .collect();
-        let child_is_r1 = child_reps.contains(&r1) || !child_reps.contains(&r2);
+        let child_is_r1 = match (child_reps.contains(&r1), child_reps.contains(&r2)) {
+            (true, false) => true,
+            (false, true) => false,
+            // Nothing to check against: rep_1 is the related definition's shape (ISO 10303-41, 23.4.4).
+            _ if child_reps.is_empty() => true,
+            _ => {
+                return Err(Error::InvalidInput(format!(
+                    "STEP #{rel}: representations #{r1} and #{r2} do not identify product #{child}"
+                )));
+            }
+        };
         let context = |r: u64| representation(self.file, r).and_then(|x| x.1);
         if let Some(it) = self
             .file
